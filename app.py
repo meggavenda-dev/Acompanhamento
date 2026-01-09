@@ -64,25 +64,46 @@ uploaded_file = st.file_uploader(
     help="Aceita CSV 'bruto' (sem cabeçalho padronizado) ou planilhas estruturadas."
 )
 
-# Estado para manter o DF processado e editado
+# ---- Estado para manter DF e controle de uploads ----
 if "df_final" not in st.session_state:
     st.session_state.df_final = None
+if "last_upload_id" not in st.session_state:
+    st.session_state.last_upload_id = None
+if "editor_key" not in st.session_state:
+    st.session_state.editor_key = "editor_pacientes_initial"
+
+# Gera um ID único do upload (arquivo + hospital) para detectar nova importação
+def _make_upload_id(file, hospital: str) -> str:
+    name = getattr(file, "name", "sem_nome")
+    size = getattr(file, "size", 0)
+    # hospital influencia o processamento; trocando hospital também deve resetar
+    return f"{name}-{size}-{hospital.strip()}"
 
 # Botão para limpar e recomeçar (opcional)
 col_reset1, col_reset2 = st.columns(2)
 with col_reset1:
     if st.button("🧹 Limpar tabela / reset"):
         st.session_state.df_final = None
+        st.session_state.last_upload_id = None
+        st.session_state.editor_key = "editor_pacientes_reset"
         st.success("Tabela limpa. Faça novo upload para reprocessar.")
 
-# Processamento
+# Processamento (com reset automático do editor em nova importação)
 if uploaded_file is not None:
+    current_upload_id = _make_upload_id(uploaded_file, selected_hospital)
+
+    # Se for uma nova importação (arquivo/hospital diferente), zera o DF e editor
+    if st.session_state.last_upload_id != current_upload_id:
+        st.session_state.df_final = None
+        st.session_state.editor_key = f"editor_pacientes_{current_upload_id}"
+        st.session_state.last_upload_id = current_upload_id
+
     with st.spinner("Processando arquivo com a lógica consolidada..."):
         try:
             df_final = process_uploaded_file(uploaded_file, prestadores_lista, selected_hospital.strip())
-            # Mensagem se ficar vazio após filtros
             if df_final is None or len(df_final) == 0:
                 st.warning("Nenhuma linha após processamento. Verifique a lista de prestadores e o conteúdo do arquivo.")
+                st.session_state.df_final = None
             else:
                 st.session_state.df_final = df_final
         except Exception as e:
@@ -121,7 +142,7 @@ if st.session_state.df_final is not None and len(st.session_state.df_final) > 0:
             "Paciente": st.column_config.TextColumn(help="Clique para editar o nome do paciente."),
         },
         hide_index=True,
-        key="editor_pacientes"
+        key=st.session_state.editor_key  # <-- chave única por importação
     )
 
     # Atualiza o estado com as edições realizadas
@@ -133,6 +154,9 @@ if st.session_state.df_final is not None and len(st.session_state.df_final) > 0:
         try:
             upsert_dataframe(st.session_state.df_final)
             st.success("Dados salvos com sucesso em exemplo.db (SQLite). Para refletir no GitHub, faça commit/push do arquivo.")
+            # Após salvar, limpar DF e editor para nova importação
+            st.session_state.df_final = None
+            st.session_state.editor_key = "editor_pacientes_after_save"
         except Exception as e:
             st.error("Falha ao salvar no banco. Veja detalhes abaixo:")
             st.exception(e)
