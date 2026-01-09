@@ -1,3 +1,4 @@
+
 # db.py
 from __future__ import annotations
 
@@ -70,7 +71,7 @@ def init_db():
         """))
 
 
-def _safe_int(val, default: int = 0) -&gt; int:
+def _safe_int(val, default: int = 0) -> int:
     """
     Converte em int com segurança (None/NaN/strings vazias viram default).
     """
@@ -92,7 +93,7 @@ def _safe_int(val, default: int = 0) -&gt; int:
         return default
 
 
-def _safe_str(val, default: str = "") -&gt; str:
+def _safe_str(val, default: str = "") -> str:
     """
     Converte em str com segurança (None/NaN viram default) e trim.
     """
@@ -110,12 +111,27 @@ def _safe_str(val, default: str = "") -&gt; str:
 def upsert_dataframe(df):
     """
     UPSERT (INSERT OR REPLACE) por (Data, Paciente, Prestador, Hospital).
+
+    GARANTIAS:
+    - ❌ Bloqueia salvamento se existir 'Paciente' vazio (None / '' / espaços)
     - Converte tipos com segurança (int/str)
-    - Normaliza trim para evitar duplicatas por espaço/acento
-    - Evita falhas por NaN/None
+    - Normaliza trim para evitar duplicatas
     """
     if df is None or len(df) == 0:
         return
+
+    # -------- Validação dura: Paciente obrigatório --------
+    if "Paciente" not in df.columns:
+        raise ValueError("Coluna 'Paciente' não encontrada no DataFrame.")
+
+    blank_mask = df["Paciente"].astype(str).str.strip() == ""
+    num_blank = int(blank_mask.sum())
+    if num_blank > 0:
+        raise ValueError(
+            f"Existem {num_blank} registro(s) com 'Paciente' vazio. "
+            "Preencha todos os nomes antes de salvar."
+        )
+    # ----------------------------------------------------
 
     engine = get_engine()
     with engine.begin() as conn:
@@ -212,3 +228,4 @@ def count_all():
     with engine.connect() as conn:
         rs = conn.execute(text("SELECT COUNT(1) FROM pacientes_unicos_por_dia_prestador"))
         return rs.scalar_one()
+
