@@ -191,12 +191,18 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
 def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
     """
     Herança linha-a-linha por Data, preservando ordem original do arquivo.
-    Quando há Prestador e (Atendimento/Paciente/Aviso) vazios, herda do último acima.
+
+    REGRAS:
+      1) Se a linha tem Prestador E (Atendimento, Data vieram preenchidos no original) E (Paciente veio em branco no original),
+         então NÃO herda Paciente (permanece em branco).
+      2) Se a linha tem Prestador E (Atendimento, Paciente, Aviso vieram todos em branco no original),
+         então herda os três do último valor acima dentro da mesma Data.
     """
     if df is None or df.empty:
         return df
 
     df = df.copy()
+    # Converte strings vazias em NA para que pd.isna funcione corretamente
     df.replace({"": pd.NA}, inplace=True)
 
     # Garante índice de ordem
@@ -207,27 +213,51 @@ def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
     if "Data" not in df.columns:
         return df
 
-    # Preenche datas ausentes
+    # Preenche datas ausentes para agrupar (o critério "vieram preenchidos" usa flags originais)
     df["Data"] = df["Data"].ffill().bfill()
 
     # Varre por data na ordem original
     for _, grp in df.groupby("Data", sort=False):
         last_att = last_pac = last_aviso = None
         for i in grp.sort_values("_row_idx").index:
+            # Valores atuais
             att = df.at[i, "Atendimento"] if "Atendimento" in df.columns else None
             pac = df.at[i, "Paciente"] if "Paciente" in df.columns else None
             av  = df.at[i, "Aviso"] if "Aviso" in df.columns else None
+
+            # Flags do conteúdo ORIGINAL (marcadas antes da herança)
+            att_orig_blank  = bool(df.at[i, "_orig_att_blank"])  if "_orig_att_blank"  in df.columns else pd.isna(att)
+            pac_orig_blank  = bool(df.at[i, "_orig_pac_blank"])  if "_orig_pac_blank"  in df.columns else pd.isna(pac)
+            av_orig_blank   = bool(df.at[i, "_orig_av_blank"])   if "_orig_av_blank"   in df.columns else pd.isna(av)
+            data_orig_blank = bool(df.at[i, "_orig_data_blank"]) if "_orig_data_blank" in df.columns else False
+
+            att_orig_filled = not att_orig_blank
+            data_orig_filled = not data_orig_blank
+
+            # Atualiza "últimos" somente quando o valor atual não é NA
             if pd.notna(att): last_att = att
             if pd.notna(pac): last_pac = pac
             if pd.notna(av):  last_aviso = av
 
-            if "Prestador" in df.columns and pd.notna(df.at[i, "Prestador"]):
-                if "Atendimento" in df.columns and pd.isna(att):
+            # Só consideramos herdar se houver Prestador na linha
+            has_prestador = ("Prestador" in df.columns and pd.notna(df.at[i, "Prestador"]))
+            if not has_prestador:
+                continue
+
+            # Regra 1: Atendimento e Data vieram preenchidos, Paciente veio vazio => NÃO herdar Paciente
+            if att_orig_filled and data_orig_filled and pac_orig_blank:
+                # Não herda paciente nem os demais nesta condição específica (mantém como está)
+                continue
+
+            # Regra 2: Os três vieram vazios no original => herdar todos
+            if att_orig_blank and pac_orig_blank and av_orig_blank:
+                if "Atendimento" in df.columns:
                     df.at[i, "Atendimento"] = last_att
-                if "Paciente" in df.columns and pd.isna(pac):
+                if "Paciente" in df.columns:
                     df.at[i, "Paciente"] = last_pac
-                if "Aviso" in df.columns and pd.isna(av):
+                if "Aviso" in df.columns:
                     df.at[i, "Aviso"] = last_aviso
+
     return df
 
 
@@ -274,16 +304,14 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
             # cria coluna vazia com alinhamento de índice
             df_in[c] = pd.NA
 
-    # >>> NOVO: máscara das linhas cujo Paciente VEIO vazio no arquivo original
-    paciente_blank_mask = df_in["Paciente"].isna() | (df_in["Paciente"].astype(str).str.strip() == "")
+    # >>> Flags do conteúdo original (antes de herdar/ffill)
+    df_in["_orig_att_blank"]  = df_in["Atendimento"].isna() | (df_in["Atendimento"].astype(str).str.strip() == "")
+    df_in["_orig_pac_blank"]  = df_in["Paciente"].isna()    | (df_in["Paciente"].astype(str).str.strip()    == "")
+    df_in["_orig_av_blank"]   = df_in["Aviso"].isna()       | (df_in["Aviso"].astype(str).str.strip()       == "")
+    df_in["_orig_data_blank"] = df_in["Data"].isna()        | (df_in["Data"].astype(str).str.strip()        == "")
 
-    # 2) Herança linha-a-linha por Data
+    # 2) Herança linha-a-linha por Data (com as regras acima)
     df = _herdar_por_data_ordem_original(df_in)
-
-    # >>> NOVO: reblank em Paciente para QUEM VEIO vazio (preserva o vazio original)
-    # reindex para alinhar índices caso o DF tenha sido reordenado
-    paciente_blank_mask = paciente_blank_mask.reindex(df.index, fill_value=False)
-    df.loc[paciente_blank_mask, "Paciente"] = pd.NA
 
     # 3) Filtros dos prestadores (case-insensitive com normalização)
     def normalize(s): return (s or "").strip().upper()
@@ -293,6 +321,11 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
         df["Prestador"] = pd.NA
     df["Prestador_norm"] = df["Prestador"].astype(str).apply(normalize)
     df = df[df["Prestador_norm"].isin(target)].copy()
+
+    # Remove colunas auxiliares (_orig_*) para não poluir a saída
+    for aux in ["_orig_att_blank","_orig_pac_blank","_orig_av_blank","_orig_data_blank","_row_idx"]:
+        if aux in df.columns:
+            pass  # mantemos _row_idx para ordenação; removemos os _orig no final (abaixo)
 
     # 4) Ordenação por tempo e deduplicação por (Data, Paciente, Prestador)
     # Garante coluna Hora_Inicio
@@ -304,7 +337,7 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
         format="%d/%m/%Y %H:%M",
         errors="coerce"
     )
-    df = df.sort_values(["Data", "Paciente", "Prestador_norm", "start_key"]).copy()
+    df = df.sort_values(["Data", "Paciente", "Prestador_norm", "start_key", "_row_idx"]).copy()
     df = df.drop_duplicates(subset=["Data", "Paciente", "Prestador_norm"], keep="first")
 
     # 5) Hospital informado + Ano/Mes/Dia
