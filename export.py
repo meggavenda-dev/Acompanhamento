@@ -47,7 +47,7 @@ def _write_sheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame):
 
 # ---------------- Exportações ----------------
 
-def to_formatted_excel(df: pd.DataFrame, sheet_name="Pacientes por dia e prestador"):
+def to_formatted_excel(df: pd.DataFrame, sheet_name: str = "Pacientes por dia e prestador") -> io.BytesIO:
     """
     Gera Excel em memória com formatação:
     - Cabeçalho em negrito e cor de fundo
@@ -61,7 +61,7 @@ def to_formatted_excel(df: pd.DataFrame, sheet_name="Pacientes por dia e prestad
     return output
 
 
-def to_formatted_excel_by_hospital(df: pd.DataFrame):
+def to_formatted_excel_by_hospital(df: pd.DataFrame) -> io.BytesIO:
     """
     Gera um Excel com uma aba por Hospital.
     - Se não houver coluna 'Hospital', cai para aba única 'Dados'
