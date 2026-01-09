@@ -14,61 +14,38 @@ try:
 except Exception:
     GITHUB_SYNC_AVAILABLE = False
 
-# ---- Config GitHub (pode pegar defaults de st.secrets) ----
-GH_OWNER_DEFAULT = st.secrets.get("GH_OWNER", "seu-usuario-ou-org")
-GH_REPO_DEFAULT = st.secrets.get("GH_REPO", "seu-repo")
-GH_BRANCH_DEFAULT = st.secrets.get("GH_BRANCH", "main")
-GH_PATH_DEFAULT = st.secrets.get("GH_DB_PATH", "data/exemplo.db")  # deve coincidir com DB_PATH
+# ---- Config GitHub (usa st.secrets; sem UI) ----
+GH_OWNER = st.secrets.get("GH_OWNER", "seu-usuario-ou-org")
+GH_REPO = st.secrets.get("GH_REPO", "seu-repo")
+GH_BRANCH = st.secrets.get("GH_BRANCH", "main")
+GH_PATH_IN_REPO = st.secrets.get("GH_DB_PATH", "data/exemplo.db")  # deve coincidir com DB_PATH em db.py
+GITHUB_TOKEN_OK = bool(st.secrets.get("GITHUB_TOKEN", ""))
 
 st.set_page_config(page_title="Pacientes por Dia, Prestador e Hospital", layout="wide")
 
 st.title("Pacientes únicos por data, prestador e hospital")
-st.caption("Download do banco no GitHub → Upload → herança/filtragem/deduplicação → informar Hospital (lista) → revisar/editar Paciente → Ano/Mes/Dia → salvar → exportar → sincronizar com GitHub")
+st.caption("Download automático do banco no GitHub → Upload → herança/filtragem/deduplicação → Hospital (lista) → editar Paciente → salvar → exportar → commit automático no GitHub")
 
 # 1) Baixa o DB do GitHub (se existir) antes de inicializar tabelas
-with st.spinner("Verificando banco no GitHub..."):
-    if GITHUB_SYNC_AVAILABLE:
-        try:
-            downloaded = download_db_from_github(
-                owner=GH_OWNER_DEFAULT,
-                repo=GH_REPO_DEFAULT,
-                path_in_repo=GH_PATH_DEFAULT,
-                branch=GH_BRANCH_DEFAULT,
-                local_db_path=DB_PATH
-            )
-            if downloaded:
-                st.success("Banco baixado do GitHub.")
-            else:
-                st.info("Banco não encontrado no GitHub (primeiro uso). Será criado localmente ao salvar.")
-        except Exception as e:
-            st.warning("Não foi possível baixar o banco do GitHub. Verifique token/permissões.")
-            st.exception(e)
-    else:
-        st.info("Sincronização com GitHub indisponível (módulo github_sync não encontrado).")
+if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
+    try:
+        downloaded = download_db_from_github(
+            owner=GH_OWNER,
+            repo=GH_REPO,
+            path_in_repo=GH_PATH_IN_REPO,
+            branch=GH_BRANCH,
+            local_db_path=DB_PATH
+        )
+        if downloaded:
+            st.success("Banco baixado do GitHub.")
+        else:
+            st.info("Banco não encontrado no GitHub (primeiro uso). Será criado localmente ao salvar.")
+    except Exception as e:
+        st.warning("Não foi possível baixar o banco do GitHub. Verifique token/permissões em st.secrets.")
+        st.exception(e)
 
 # Inicializa DB (cria tabela/índices se necessário)
 init_db()
-
-# Info de persistência
-with st.expander("ℹ️ Informações de persistência"):
-    st.write("Este app salva os dados em um arquivo SQLite local e pode sincronizar com o GitHub.")
-    st.code(f"DB_PATH = {DB_PATH}", language="text")
-    try:
-        if os.path.exists(DB_PATH):
-            size_mb = os.path.getsize(DB_PATH) / (1024 * 1024)
-            st.caption(f"Arquivo do banco: {DB_PATH} ({size_mb:.2f} MB)")
-            with open(DB_PATH, "rb") as f:
-                st.download_button(
-                    "Baixar arquivo do banco (SQLite)",
-                    data=f.read(),
-                    file_name="exemplo.db",
-                    mime="application/x-sqlite3",
-                    help="Baixe o arquivo e versione no GitHub se quiser manter histórico."
-                )
-        else:
-            st.info("O arquivo do banco ainda não existe. Salve alguma carga para gerar o arquivo.")
-    except Exception as _e:
-        pass
 
 # ---------------- Configuração dos Prestadores ----------------
 st.subheader("Prestadores alvo")
@@ -186,22 +163,38 @@ if st.session_state.df_final is not None and len(st.session_state.df_final) > 0:
     # Atualiza o estado com as edições realizadas
     st.session_state.df_final = edited_df
 
-    # ---------------- Gravar no Banco ----------------
+    # ---------------- Gravar no Banco + commit automático no GitHub ----------------
     st.subheader("Persistência")
     if st.button("Salvar no banco (exemplo.db)"):
         try:
+            # 1) UPSERT local
             upsert_dataframe(st.session_state.df_final)
+
+            # 2) Contagem para feedback
             total = count_all()
             st.success(f"Dados salvos com sucesso em exemplo.db. Total de linhas no banco: {total}")
-            try:
-                if os.path.exists(DB_PATH):
-                    size_mb = os.path.getsize(DB_PATH) / (1024 * 1024)
-                    st.caption(f"Arquivo do banco: {DB_PATH} ({size_mb:.2f} MB)")
-            except Exception:
-                pass
-            # Após salvar, limpar DF e editor para nova importação
+
+            # 3) Commit/push automático para GitHub
+            if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
+                try:
+                    ok = upload_db_to_github(
+                        owner=GH_OWNER,
+                        repo=GH_REPO,
+                        path_in_repo=GH_PATH_IN_REPO,
+                        branch=GH_BRANCH,
+                        local_db_path=DB_PATH,
+                        commit_message="Atualiza banco SQLite via app (salvar no banco)"
+                    )
+                    if ok:
+                        st.success("Sincronização automática com GitHub concluída.")
+                except Exception as e:
+                    st.error("Falha ao sincronizar com GitHub (commit automático).")
+                    st.exception(e)
+
+            # 4) Limpa DF e editor para nova importação
             st.session_state.df_final = None
             st.session_state.editor_key = "editor_pacientes_after_save"
+
         except Exception as e:
             st.error("Falha ao salvar no banco. Veja detalhes abaixo:")
             st.exception(e)
@@ -219,15 +212,6 @@ if st.session_state.df_final is not None and len(st.session_state.df_final) > 0:
 # ---------------- Conteúdo atual do banco ----------------
 st.divider()
 st.subheader("Conteúdo atual do banco (exemplo.db)")
-try:
-    if os.path.exists(DB_PATH):
-        size_mb = os.path.getsize(DB_PATH) / (1024 * 1024)
-        st.caption(f"Arquivo do banco: {DB_PATH} ({size_mb:.2f} MB)")
-    else:
-        st.caption(f"Arquivo do banco não encontrado em: {DB_PATH}")
-except Exception:
-    pass
-
 rows = read_all()
 if rows:
     cols = ["Hospital", "Ano", "Mes", "Dia", "Data", "Atendimento", "Paciente", "Aviso", "Convenio", "Prestador", "Quarto"]
@@ -248,46 +232,3 @@ if rows:
     )
 else:
     st.info("Banco ainda sem dados. Faça o upload e clique em 'Salvar no banco'.")
-    try:
-        total_now = count_all()
-        st.caption(f"Contagem direta via SQL: {total_now} linha(s).")
-    except Exception:
-        pass
-
-# ---------------- Sincronização com GitHub ----------------
-with st.expander("🔄 Sincronização com GitHub"):
-    if not GITHUB_SYNC_AVAILABLE:
-        st.warning("Sincronização indisponível: módulo github_sync.py não encontrado.")
-        st.stop()
-
-    st.caption("Faça commit/push do arquivo ./data/exemplo.db no repositório para manter persistência entre reinícios.")
-    owner = st.text_input("Owner/Org", GH_OWNER_DEFAULT)
-    repo = st.text_input("Repository", GH_REPO_DEFAULT)
-    branch = st.text_input("Branch", GH_BRANCH_DEFAULT)
-    path_in_repo = st.text_input("Caminho no repo", GH_PATH_DEFAULT)
-    commit_message = st.text_input("Mensagem de commit", "Atualiza banco SQLite via app")
-
-    col_sync1, col_sync2 = st.columns(2)
-    with col_sync1:
-        if st.button("⬆️ Subir banco para GitHub (commit)"):
-            try:
-                ok = upload_db_to_github(owner, repo, path_in_repo, branch, DB_PATH, commit_message)
-                if ok:
-                    st.success("Sincronizado com GitHub com sucesso.")
-            except Exception as e:
-                st.error("Falha ao sincronizar: verifique GITHUB_TOKEN/permite repo/write, owner/repo/branch/caminho.")
-                st.exception(e)
-
-    with col_sync2:
-        if st.button("⬇️ Baixar banco do GitHub (pull)"):
-            try:
-                downloaded = download_db_from_github(owner, repo, path_in_repo, branch, DB_PATH)
-                if downloaded:
-                    st.success("Banco baixado do GitHub e sobrescrito localmente. Recarregando app...")
-                    # Para garantir que o engine do SQLite recarregue o arquivo, peça um rerun
-                    st.rerun()
-                else:
-                    st.info("Arquivo ainda não existe no repositório.")
-            except Exception as e:
-                st.error("Falha ao baixar do GitHub.")
-                st.exception(e)
