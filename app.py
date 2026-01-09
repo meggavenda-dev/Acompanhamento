@@ -9,7 +9,7 @@ from export import to_formatted_excel_by_hospital
 st.set_page_config(page_title="Pacientes por Dia, Prestador e Hospital", layout="wide")
 
 st.title("Pacientes únicos por data, prestador e hospital")
-st.caption("Upload → herança/filtragem/deduplicação → informar Hospital do arquivo → Ano/Mes/Dia → salvar em exemplo.db → exportar por Hospital")
+st.caption("Upload → herança/filtragem/deduplicação → informar Hospital do arquivo (lista) → Ano/Mes/Dia → salvar em exemplo.db → exportar por Hospital")
 
 # Inicializa DB
 init_db()
@@ -25,12 +25,18 @@ prestadores_text = st.text_area(
 )
 prestadores_lista = [p.strip() for p in prestadores_text.splitlines() if p.strip()]
 
-# ---------------- Hospital do arquivo ----------------
+# ---------------- Hospital do arquivo (lista fixa) ----------------
 st.subheader("Hospital deste arquivo")
-selected_hospital = st.text_input(
-    "Digite o nome exato do Hospital referente à planilha enviada",
-    value="",
-    help="Todas as linhas processadas deste arquivo receberão exatamente este hospital."
+hospital_opcoes = [
+    "Hospital Santa Lucia Sul",
+    "Hospital Santa Lucia Norte",
+    "Hospital Maria Auxiliadora",
+]
+selected_hospital = st.selectbox(
+    "Selecione o Hospital referente à planilha enviada",
+    options=hospital_opcoes,
+    index=0,
+    help="O hospital selecionado será aplicado a todas as linhas processadas deste arquivo."
 )
 
 # ---------------- Upload de Arquivo ----------------
@@ -43,35 +49,32 @@ uploaded_file = st.file_uploader(
 
 df_final = None
 if uploaded_file is not None:
-    if not selected_hospital.strip():
-        st.warning("Informe o Hospital do arquivo antes de processar.")
-    else:
-        with st.spinner("Processando arquivo com a lógica consolidada..."):
-            # >>> nova assinatura de processing.py: passa o hospital escolhido
-            df_final = process_uploaded_file(uploaded_file, prestadores_lista, selected_hospital.strip())
+    with st.spinner("Processando arquivo com a lógica consolidada..."):
+        # >>> nova assinatura de processing.py: passa o hospital escolhido
+        df_final = process_uploaded_file(uploaded_file, prestadores_lista, selected_hospital.strip())
 
-        st.success(f"Processamento concluído! Linhas: {len(df_final)}")
-        # Exibe já ordenado por Hospital/Ano/Mes/Dia
-        st.dataframe(
-            df_final.sort_values(["Hospital", "Ano", "Mes", "Dia", "Paciente", "Prestador"]),
-            use_container_width=True
-        )
+    st.success(f"Processamento concluído! Linhas: {len(df_final)}")
+    # Exibe já ordenado por Hospital/Ano/Mes/Dia
+    st.dataframe(
+        df_final.sort_values(["Hospital", "Ano", "Mes", "Dia", "Paciente", "Prestador"]),
+        use_container_width=True
+    )
 
-        # ---------------- Gravar no Banco ----------------
-        st.subheader("Persistência")
-        if st.button("Salvar no banco (exemplo.db)"):
-            upsert_dataframe(df_final)
-            st.success("Dados salvos com sucesso em exemplo.db (SQLite). Para refletir no GitHub, faça commit/push do arquivo.")
+    # ---------------- Gravar no Banco ----------------
+    st.subheader("Persistência")
+    if st.button("Salvar no banco (exemplo.db)"):
+        upsert_dataframe(df_final)
+        st.success("Dados salvos com sucesso em exemplo.db (SQLite). Para refletir no GitHub, faça commit/push do arquivo.")
 
-        # ---------------- Exportar Excel (por Hospital) ----------------
-        st.subheader("Exportar Excel (multi-aba por Hospital)")
-        excel_bytes = to_formatted_excel_by_hospital(df_final)
-        st.download_button(
-            label="Baixar Excel por Hospital",
-            data=excel_bytes,
-            file_name="Pacientes_por_dia_prestador_hospital.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+    # ---------------- Exportar Excel (por Hospital) ----------------
+    st.subheader("Exportar Excel (multi-aba por Hospital)")
+    excel_bytes = to_formatted_excel_by_hospital(df_final)
+    st.download_button(
+        label="Baixar Excel por Hospital",
+        data=excel_bytes,
+        file_name="Pacientes_por_dia_prestador_hospital.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
 # ---------------- Conteúdo atual do banco ----------------
 st.divider()
