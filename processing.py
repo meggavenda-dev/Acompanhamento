@@ -190,9 +190,9 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
 # ---------------- Herança por data mantendo ordem original ----------------
 def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Ajusta herança linha-a-linha por Data, com salvaguardas:
+    Herança linha-a-linha por Data com salvaguardas:
       - NÃO herdar Paciente em linhas com horário quando veio vazio.
-      - Herdar somente se o Prestador atual for o mesmo do último Prestador do bloco.
+      - Herdar SOMENTE do último atendimento COM horário do mesmo Prestador (por Data).
     """
     if df is None or df.empty:
         return df
@@ -209,55 +209,57 @@ def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
     df["Data"] = df["Data"].ffill().bfill()
 
     for _, grp in df.groupby("Data", sort=False):
-        last_att = last_pac = last_aviso = None
-        last_prestador = None
+        # Mapas por prestador (atualizados APENAS quando a linha tem horário)
+        last_att_by_prest = {}
+        last_pac_by_prest = {}
+        last_aviso_by_prest = {}
 
         for i in grp.sort_values("_row_idx").index:
-            att = df.at[i, "Atendimento"] if "Atendimento" in df.columns else None
-            pac = df.at[i, "Paciente"] if "Paciente" in df.columns else None
-            av  = df.at[i, "Aviso"] if "Aviso" in df.columns else None
+            att   = df.at[i, "Atendimento"] if "Atendimento" in df.columns else None
+            pac   = df.at[i, "Paciente"] if "Paciente" in df.columns else None
+            aviso = df.at[i, "Aviso"] if "Aviso" in df.columns else None
             prest = df.at[i, "Prestador"] if "Prestador" in df.columns else None
             has_time = "Hora_Inicio" in df.columns and pd.notna(df.at[i, "Hora_Inicio"])
 
+            # Flags do conteúdo ORIGINAL
             att_orig_blank  = bool(df.at[i, "_orig_att_blank"])  if "_orig_att_blank"  in df.columns else pd.isna(att)
             pac_orig_blank  = bool(df.at[i, "_orig_pac_blank"])  if "_orig_pac_blank"  in df.columns else pd.isna(pac)
-            av_orig_blank   = bool(df.at[i, "_orig_av_blank"])   if "_orig_av_blank"   in df.columns else pd.isna(av)
+            av_orig_blank   = bool(df.at[i, "_orig_av_blank"])   if "_orig_av_blank"   in df.columns else pd.isna(aviso)
             data_orig_blank = bool(df.at[i, "_orig_data_blank"]) if "_orig_data_blank" in df.columns else False
 
             att_orig_filled = not att_orig_blank
             data_orig_filled = not data_orig_blank
 
-            # Atualiza "últimos" quando há valor
-            if pd.notna(att): last_att = att
-            if pd.notna(pac): last_pac = pac
-            if pd.notna(av):  last_aviso = av
-            if pd.notna(prest): last_prestador = prest
+            # Atualizações APENAS quando há horário (definem "caso" do prestador)
+            if has_time:
+                if pd.notna(att):   last_att_by_prest[prest]   = att
+                if pd.notna(pac):   last_pac_by_prest[prest]   = pac
+                if pd.notna(aviso): last_aviso_by_prest[prest] = aviso
 
-            # Só consideramos herdar se houver Prestador na linha
-            has_prestador = ("Prestador" in df.columns and pd.notna(prest))
-            if not has_prestador:
+            # Salvaguarda: sem prestador, não tentamos herdar
+            if not (isinstance(prest, str) and prest.strip()):
                 continue
 
-            # Salvaguarda A: NÃO herdar Paciente em linhas com horário quando Paciente veio vazio
+            # 1) Linha com horário e Paciente vazio -> NUNCA herdar Paciente
             if has_time and pac_orig_blank:
-                # Mantém paciente vazio; pode ainda herdar Aviso/Atendimento se necessário?
                 continue
 
-            # Regra 1 (mantida): Atendimento e Data vieram preenchidos, Paciente veio vazio => NÃO herdar Paciente
+            # 2) Atendimento+Data vieram preenchidos e Paciente vazio -> NÃO herdar Paciente
             if att_orig_filled and data_orig_filled and pac_orig_blank:
                 continue
 
-            # Regra 2 (apertada): herdar os três SOMENTE quando os três vieram vazios
-            # e (sem horário OU prestador não mudou)
-            if att_orig_blank and pac_orig_blank and av_orig_blank:
-                same_prestador = (pd.notna(last_prestador) and prest == last_prestador)
-                if (not has_time) or same_prestador:
-                    if "Atendimento" in df.columns:
-                        df.at[i, "Atendimento"] = last_att
-                    if "Paciente" in df.columns:
-                        df.at[i, "Paciente"] = last_pac
-                    if "Aviso" in df.columns:
-                        df.at[i, "Aviso"] = last_aviso
+            # 3) Linhas sem horário: herdar somente do último atendimento COM horário do mesmo prestador
+            if (not has_time) and att_orig_blank and pac_orig_blank and av_orig_blank:
+                src_att   = last_att_by_prest.get(prest, None)
+                src_pac   = last_pac_by_prest.get(prest, None)
+                src_aviso = last_aviso_by_prest.get(prest, None)
+
+                if "Atendimento" in df.columns and pd.notna(src_att):
+                    df.at[i, "Atendimento"] = src_att
+                if "Paciente" in df.columns and pd.notna(src_pac):
+                    df.at[i, "Paciente"] = src_pac
+                if "Aviso" in df.columns and pd.notna(src_aviso):
+                    df.at[i, "Aviso"] = src_aviso
 
     return df
 
@@ -297,7 +299,7 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
     df_in["_orig_av_blank"]   = df_in["Aviso"].isna()       | (df_in["Aviso"].astype(str).str.strip()       == "")
     df_in["_orig_data_blank"] = df_in["Data"].isna()        | (df_in["Data"].astype(str).str.strip()        == "")
 
-    # 2) Herança por Data (com salvaguardas)
+    # 2) Herança por Data (com salvaguardas por prestador)
     df = _herdar_por_data_ordem_original(df_in)
 
     # 3) Filtro de prestadores (case-insensitive com normalização)
