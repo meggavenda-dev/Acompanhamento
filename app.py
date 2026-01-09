@@ -1,7 +1,9 @@
+
 # app.py
+import os
 import streamlit as st
 import pandas as pd
-from db import init_db, upsert_dataframe, read_all
+from db import init_db, upsert_dataframe, read_all, DB_PATH
 from processing import process_uploaded_file
 from export import to_formatted_excel_by_hospital
 
@@ -12,6 +14,22 @@ st.caption("Upload → herança/filtragem/deduplicação → informar Hospital (
 
 # Inicializa DB
 init_db()
+
+# Info de persistência
+with st.expander("ℹ️ Informações de persistência"):
+    st.write("Este app salva os dados em um arquivo SQLite local.")
+    st.code(f"DB_PATH = {DB_PATH}", language="text")
+    if os.path.exists(DB_PATH):
+        with open(DB_PATH, "rb") as f:
+            st.download_button(
+                "Baixar arquivo do banco (SQLite)",
+                data=f.read(),
+                file_name="exemplo.db",
+                mime="application/x-sqlite3",
+                help="Baixe o arquivo e versiona no Git se quiser manter histórico."
+            )
+    else:
+        st.info("O arquivo do banco ainda não existe. Salve alguma carga para gerar o arquivo.")
 
 # ---------------- Configuração dos Prestadores ----------------
 st.subheader("Prestadores alvo")
@@ -50,14 +68,29 @@ uploaded_file = st.file_uploader(
 if "df_final" not in st.session_state:
     st.session_state.df_final = None
 
+# Botão para limpar e recomeçar (opcional)
+col_reset1, col_reset2 = st.columns(2)
+with col_reset1:
+    if st.button("🧹 Limpar tabela / reset"):
+        st.session_state.df_final = None
+        st.success("Tabela limpa. Faça novo upload para reprocessar.")
+
+# Processamento
 if uploaded_file is not None:
     with st.spinner("Processando arquivo com a lógica consolidada..."):
-        # Processa com hospital selecionado
-        df_final = process_uploaded_file(uploaded_file, prestadores_lista, selected_hospital.strip())
-        st.session_state.df_final = df_final
+        try:
+            df_final = process_uploaded_file(uploaded_file, prestadores_lista, selected_hospital.strip())
+            # Mensagem se ficar vazio após filtros
+            if df_final is None or len(df_final) == 0:
+                st.warning("Nenhuma linha após processamento. Verifique a lista de prestadores e o conteúdo do arquivo.")
+            else:
+                st.session_state.df_final = df_final
+        except Exception as e:
+            st.error("Falha ao processar o arquivo. Verifique o formato da planilha/CSV.")
+            st.exception(e)
 
 # ---------------- Revisão / Edição ----------------
-if st.session_state.df_final is not None:
+if st.session_state.df_final is not None and len(st.session_state.df_final) > 0:
     st.success(f"Processamento concluído! Linhas: {len(st.session_state.df_final)}")
 
     st.subheader("Revisar e editar nomes de Paciente (opcional)")
@@ -97,8 +130,12 @@ if st.session_state.df_final is not None:
     # ---------------- Gravar no Banco ----------------
     st.subheader("Persistência")
     if st.button("Salvar no banco (exemplo.db)"):
-        upsert_dataframe(st.session_state.df_final)
-        st.success("Dados salvos com sucesso em exemplo.db (SQLite). Para refletir no GitHub, faça commit/push do arquivo.")
+        try:
+            upsert_dataframe(st.session_state.df_final)
+            st.success("Dados salvos com sucesso em exemplo.db (SQLite). Para refletir no GitHub, faça commit/push do arquivo.")
+        except Exception as e:
+            st.error("Falha ao salvar no banco. Veja detalhes abaixo:")
+            st.exception(e)
 
     # ---------------- Exportar Excel (por Hospital) ----------------
     st.subheader("Exportar Excel (multi-aba por Hospital)")
