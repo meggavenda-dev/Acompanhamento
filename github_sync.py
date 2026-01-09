@@ -3,7 +3,6 @@
 import base64
 import os
 import json
-import time
 import requests
 import streamlit as st
 
