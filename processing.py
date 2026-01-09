@@ -176,53 +176,14 @@ def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ------------------ Hospital (regras) + Ano/Mes/Dia ------------------
+# ------------------ Função principal (sem inferência por regras) ------------------
 
-def _parse_hospital_rules(rules_text: str):
-    """
-    Regras no formato:
-        PADRAO_TEXTO => Nome do Hospital
-
-    Exemplo:
-        BGS SANTA LUCIA => Hospital Santa Lucia Sul
-        HOSPITAL SANTA LUCIA NORTE => Hospital Santa Lucia Norte
-        BGS OBRA MARIA AUXILI => Hospital Maria Auxiliadora
-    """
-    rules = []
-    for line in (rules_text or "").splitlines():
-        if "=>" in line:
-            pat, name = line.split("=>", 1)
-            pat = pat.strip().upper()
-            name = name.strip()
-            if pat and name:
-                rules.append((pat, name))
-    return rules
-
-def infer_hospital(row: pd.Series, rules) -> str:
-    """
-    Inferir Hospital pesquisando o padrão em Convênio, Centro e Quarto (case-insensitive).
-    """
-    candidates = []
-    for col in ["Convenio", "Centro", "Quarto"]:
-        val = str(row.get(col, "") or "").upper()
-        if val:
-            candidates.append(val)
-
-    for pat, name in rules:
-        for c in candidates:
-            if pat in c:
-                return name
-    return "Não mapeado"
-
-
-# ------------------ Função principal ------------------
-
-def process_uploaded_file(upload, prestadores_lista, hospital_rules_text):
+def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
     """
     Entrada:
       - upload: arquivo enviado pelo Streamlit (CSV/Excel/Texto)
       - prestadores_lista: lista de prestadores alvo (strings)
-      - hospital_rules_text: regras "pattern => nome" para mapear Hospital
+      - selected_hospital: nome do Hospital informado no app (aplicado a todas as linhas)
 
     Saída:
       DataFrame final com colunas:
@@ -270,9 +231,11 @@ def process_uploaded_file(upload, prestadores_lista, hospital_rules_text):
     df = df.sort_values(["Data", "Paciente", "Prestador_norm", "start_key"]).copy()
     df = df.drop_duplicates(subset=["Data", "Paciente", "Prestador_norm"], keep="first")
 
-    # 5) Hospital + Ano/Mes/Dia
-    rules = _parse_hospital_rules(hospital_rules_text)
-    df["Hospital"] = df.apply(lambda r: infer_hospital(r, rules), axis=1)
+    # 5) Hospital informado + Ano/Mes/Dia
+    hosp = (selected_hospital or "").strip()
+    if not hosp:
+        hosp = "Hospital não informado"
+    df["Hospital"] = hosp
 
     dt = pd.to_datetime(df["Data"], format="%d/%m/%Y", errors="coerce")
     df["Ano"] = dt.dt.year
