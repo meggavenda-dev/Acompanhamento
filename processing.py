@@ -44,6 +44,7 @@ PROCEDURE_HINTS = {
     "LINFADENECTOMIA", "RECONSTRUÇÃO", "RETOSSIGMOIDECTOMIA", "PLEUROSCOPIA",
 }
 
+
 def _is_probably_procedure_token(tok) -> bool:
     """
     Heurística para sinalizar que um token parece ser texto de procedimento (não paciente).
@@ -63,8 +64,9 @@ def _is_probably_procedure_token(tok) -> bool:
         return True
     return False
 
-# Remoção de acentos para comparações robustas (Prestador, etc.)
+
 def _strip_accents(s: str) -> str:
+    """Remove acentos para comparações robustas (Prestador, etc.)."""
     if s is None or pd.isna(s):
         return ""
     s = str(s)
@@ -85,10 +87,7 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     # strip + remove BOM
-    df.columns = [
-        str(c).replace("\ufeff", "").strip()
-        for c in df.columns
-    ]
+    df.columns = [str(c).replace("\ufeff", "").strip() for c in df.columns]
 
     # mapa de sinônimos -> nomes esperados
     col_map = {
@@ -138,10 +137,7 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
 
         # Detecta seção (reinicia contexto)
         if "Centro Cirurgico" in line or "Centro Cirúrgico" in line:
-            current_section = next(
-                (kw for kw in SECTION_KEYWORDS if kw in line),
-                None
-            )
+            current_section = next((kw for kw in SECTION_KEYWORDS if kw in line), None)
             ctx = {k: None for k in ctx}
             continue
 
@@ -330,49 +326,6 @@ def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # =========================
-# Sanitização do campo Paciente
-# =========================
-
-def _sanitize_patient_field(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Zera 'Paciente' quando:
-    - Paciente == Cirurgia
-    - Paciente contém hints de procedimento
-    - Paciente aparenta texto técnico (muito longo / vírgulas / barras / parênteses / traços)
-    (Evita avaliar boolean de pd.NA)
-    """
-    if df is None or df.empty:
-        return df
-    df = df.copy()
-
-    def clean_pac(row: pd.Series) -> str:
-        pac_val = row.get("Paciente", pd.NA)
-        cir_val = row.get("Cirurgia", pd.NA)
-
-        pac = "" if pd.isna(pac_val) else str(pac_val).strip()
-        cir = "" if pd.isna(cir_val) else str(cir_val).strip()
-
-        if pac == "":
-            return pac  # já está vazio
-
-        # Igual à cirurgia -> não é paciente
-        if cir and pac.upper() == cir.upper():
-            return ""  # zera
-
-        # Heurística de procedimento
-        if _is_probably_procedure_token(pac):
-            return ""  # zera
-
-        return pac
-
-    if "Paciente" not in df.columns:
-        df["Paciente"] = pd.NA
-
-    df["Paciente"] = df.apply(clean_pac, axis=1).replace({"": pd.NA})
-    return df
-
-
-# =========================
 # Pipeline principal
 # =========================
 
@@ -421,11 +374,32 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
             # cria coluna vazia com alinhamento de índice
             df_in[c] = pd.NA
 
-    # 2) Herança linha-a-linha por Data
-    df = _herdar_por_data_ordem_original(df_in)
+    # >>> Guarda os valores CRUS pré-herança (usados na dedup híbrida)
+    df_in["__pac_raw"]   = df_in["Paciente"]
+    df_in["__att_raw"]   = df_in["Atendimento"]
+    df_in["__aviso_raw"] = df_in["Aviso"]
 
-    # 2.1) Sanitização do campo Paciente (evita nomes de procedimentos)
-    df = _sanitize_patient_field(df)
+    # Sanitiza SOMENTE o __pac_raw (para remover “paciente = cirurgia” / texto técnico)
+    def _sanitize_one(pac_val, cir_val):
+        pac = "" if pd.isna(pac_val) else str(pac_val).strip()
+        cir = "" if pd.isna(cir_val) else str(cir_val).strip()
+        if pac == "":
+            return pd.NA
+        if cir and pac.upper() == cir.upper():
+            return pd.NA
+        if _is_probably_procedure_token(pac):
+            return pd.NA
+        return pac
+
+    df_in["__pac_raw"] = [
+        _sanitize_one(p, c) for p, c in zip(
+            df_in["__pac_raw"],
+            df_in.get("Cirurgia", pd.Series(index=df_in.index))
+        )
+    ]
+
+    # 2) Herança CONTROLADA (aplicada após salvar os CRUS)
+    df = _herdar_por_data_ordem_original(df_in)
 
     # 3) Filtro de prestadores (case-insensitive + remoção de acentos)
     def norm(s):
@@ -434,7 +408,7 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
         s = _strip_accents(s)
         return s.strip().upper()
 
-    target = [norm(p) for p in prestadores_lista]  # inclua "CASSIO CESAR" aqui ao chamar a função
+    target = [norm(p) for p in prestadores_lista]  # inclua "CASSIO CESAR" na chamada
 
     # Garante coluna Prestador
     if "Prestador" not in df.columns:
@@ -443,40 +417,41 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
     df["Prestador_norm"] = df["Prestador"].apply(norm)
     df = df[df["Prestador_norm"].isin(target)].copy()
 
-    # 4) Ordenação por tempo
+    # 4) start_key (ordenação temporal)
     hora_inicio = df["Hora_Inicio"] if "Hora_Inicio" in df.columns else pd.Series("", index=df.index)
     data_series = df["Data"] if "Data" in df.columns else pd.Series("", index=df.index)
-
     df["start_key"] = pd.to_datetime(
         data_series.fillna("").astype(str) + " " + hora_inicio.fillna("").astype(str),
         format="%d/%m/%Y %H:%M",
         errors="coerce"
     )
 
-    # 4.1) Deduplicação híbrida (Paciente -> Atendimento -> Aviso -> fallback tempo)
+    # 4.1) DEDUP HÍBRIDA com os VALORES CRUS (pré-herança)
     def _norm_blank(series: pd.Series) -> pd.Series:
         return series.fillna("").astype(str).str.strip().str.upper()
 
-    P  = _norm_blank(df.get("Paciente", pd.Series(index=df.index)))
-    A  = _norm_blank(df.get("Atendimento", pd.Series(index=df.index)))
-    V  = _norm_blank(df.get("Aviso", pd.Series(index=df.index)))
-    D  = _norm_blank(df.get("Data", pd.Series(index=df.index)))
-    PR = df["Prestador_norm"].fillna("").astype(str)
+    P_raw  = _norm_blank(df["__pac_raw"])
+    A_raw  = _norm_blank(df["__att_raw"])
+    V_raw  = _norm_blank(df["__aviso_raw"])
+    D      = _norm_blank(df["Data"])
+    PR     = df["Prestador_norm"].fillna("").astype(str)
 
-    # Tag de deduplicação: P (preferencial), senão A, senão V, senão fallback com tempo
-    df["__dedup_tag"] = np.where(P != "",
-                                 "P|" + D + "|" + P + "|" + PR,
-                                 np.where(A != "",
-                                          "A|" + D + "|" + A + "|" + PR,
-                                          np.where(V != "",
-                                                   "V|" + D + "|" + V + "|" + PR,
-                                                   "T|" + D + "|" + PR + "|" + df["start_key"].astype(str)
-                                          )
-                                 ))
+    df["__dedup_tag"] = np.where(P_raw != "",
+        "P|" + D + "|" + P_raw + "|" + PR,
+        np.where(A_raw != "",
+            "A|" + D + "|" + A_raw + "|" + PR,
+            np.where(V_raw != "",
+                "V|" + D + "|" + V_raw + "|" + PR,
+                "T|" + D + "|" + PR + "|" + df["start_key"].astype(str)
+            )
+        )
+    )
 
     df = df.sort_values(["Data", "Paciente", "Prestador_norm", "start_key"])
     df = df.drop_duplicates(subset=["__dedup_tag"], keep="first")
-    df = df.drop(columns=["__dedup_tag"])
+
+    # Limpeza de colunas técnicas
+    df = df.drop(columns=["__dedup_tag", "__pac_raw", "__att_raw", "__aviso_raw"], errors="ignore")
 
     # 5) Hospital + Ano/Mes/Dia
     hosp = selected_hospital if (selected_hospital and not pd.isna(selected_hospital)) else ""
