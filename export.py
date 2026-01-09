@@ -15,14 +15,18 @@ def _sanitize_sheet_name(name: str, fallback: str = "Dados") -> str:
     - limita a 31 caracteres
     - se vazio após limpeza, usa fallback
     """
-    if name is None:
-        name = ""
-    name = str(name).strip()
-    name = _INVALID_SHEET_CHARS_RE.sub("", name)
     if not name:
         name = fallback
-    # Excel limita a 31
+
+    name = str(name).strip()
+    name = _INVALID_SHEET_CHARS_RE.sub("", name)
+
+    if not name:
+        name = fallback
+
+    # Excel limita a 31 caracteres
     return name[:31]
+
 
 def _write_sheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame):
     """
@@ -33,12 +37,20 @@ def _write_sheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame):
     ws = writer.sheets[sheet_name]
 
     # Cabeçalho
-    header_fmt = wb.add_format({"bold": True, "bg_color": "#DCE6F1", "border": 1})
+    header_fmt = wb.add_format({
+        "bold": True,
+        "bg_color": "#DCE6F1",
+        "border": 1
+    })
+
     for col_num, value in enumerate(df.columns.values):
         ws.write(0, col_num, value, header_fmt)
 
-    # Autofiltro e largura de colunas
-    ws.autofilter(0, 0, len(df), max(0, len(df.columns) - 1))
+    # Autofiltro (range correto)
+    last_row = max(len(df), 1)
+    ws.autofilter(0, 0, last_row, max(0, len(df.columns) - 1))
+
+    # Ajuste automático de largura
     for i, col in enumerate(df.columns):
         valores = [str(x) for x in df[col].tolist()]
         maxlen = max([len(str(col))] + [len(v) for v in valores]) + 2
@@ -47,12 +59,15 @@ def _write_sheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame):
 
 # ---------------- Exportações ----------------
 
-def to_formatted_excel(df: pd.DataFrame, sheet_name: str = "Pacientes por dia e prestador") -> io.BytesIO:
+def to_formatted_excel(
+    df: pd.DataFrame,
+    sheet_name: str = "Pacientes por dia e prestador"
+) -> io.BytesIO:
     """
-    Gera Excel em memória com formatação:
-    - Cabeçalho em negrito e cor de fundo
-    - Auto filtro
-    - Largura de colunas ajustada
+    Gera Excel em memória com:
+    - Cabeçalho formatado
+    - Autofiltro
+    - Largura automática das colunas
     """
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
@@ -64,24 +79,35 @@ def to_formatted_excel(df: pd.DataFrame, sheet_name: str = "Pacientes por dia e 
 def to_formatted_excel_by_hospital(df: pd.DataFrame) -> io.BytesIO:
     """
     Gera um Excel com uma aba por Hospital.
-    - Se não houver coluna 'Hospital', cai para aba única 'Dados'
+    - Normaliza o nome do Hospital
+    - Ordena abas alfabeticamente
     - Em cada aba, ordena por: Ano, Mes, Dia, Paciente, Prestador (quando existirem)
-    - Aplica formatação de cabeçalho, autofiltro e ajuste de colunas
     """
     output = io.BytesIO()
+
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         if "Hospital" not in df.columns:
-            # fallback: única aba
             _write_sheet(writer, "Dados", df)
         else:
-            # Ordenação padrão aplicada por aba (se colunas existirem)
-            order_cols = [c for c in ["Ano", "Mes", "Dia", "Paciente", "Prestador"] if c in df.columns]
-            # Agrupa e escreve cada hospital em uma aba
-            for hosp, dfh in df.groupby("Hospital"):
-                dfh_sorted = dfh.copy()
+            df_aux = df.copy()
+            df_aux["Hospital"] = (
+                df_aux["Hospital"]
+                .fillna("Sem_Hospital")
+                .astype(str)
+                .str.strip()
+                .replace("", "Sem_Hospital")
+            )
+
+            order_cols = [c for c in ["Ano", "Mes", "Dia", "Paciente", "Prestador"] if c in df_aux.columns]
+
+            # Ordena hospitais para gerar abas previsíveis
+            for hosp in sorted(df_aux["Hospital"].unique()):
+                dfh = df_aux[df_aux["Hospital"] == hosp].copy()
                 if order_cols:
-                    dfh_sorted = dfh_sorted.sort_values(order_cols, kind="mergesort")
-                sheet_name = _sanitize_sheet_name(hosp or "Sem_Hospital")
-                _write_sheet(writer, sheet_name, dfh_sorted)
+                    dfh = dfh.sort_values(order_cols, kind="mergesort")
+
+                sheet_name = _sanitize_sheet_name(hosp, fallback="Sem_Hospital")
+                _write_sheet(writer, sheet_name, dfh)
+
     output.seek(0)
     return output
