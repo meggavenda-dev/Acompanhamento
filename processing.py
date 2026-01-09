@@ -44,7 +44,6 @@ PROCEDURE_HINTS = {
     "LINFADENECTOMIA", "RECONSTRUÇÃO", "RETOSSIGMOIDECTOMIA", "PLEUROSCOPIA",
 }
 
-
 def _is_probably_procedure_token(tok) -> bool:
     """
     Heurística para sinalizar que um token parece ser texto de procedimento (não paciente).
@@ -63,7 +62,6 @@ def _is_probably_procedure_token(tok) -> bool:
     if len(T) > 50:
         return True
     return False
-
 
 def _strip_accents(s: str) -> str:
     """Remove acentos para comparações robustas (Prestador, etc.)."""
@@ -374,12 +372,12 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
             # cria coluna vazia com alinhamento de índice
             df_in[c] = pd.NA
 
-    # >>> Guarda os valores CRUS pré-herança (usados na dedup híbrida)
+    # >>> Guarda os valores CRUS pré-herança (usados na dedup híbrida e para refletir o relatório)
     df_in["__pac_raw"]   = df_in["Paciente"]
     df_in["__att_raw"]   = df_in["Atendimento"]
     df_in["__aviso_raw"] = df_in["Aviso"]
 
-    # Sanitiza SOMENTE o __pac_raw (para remover “paciente = cirurgia” / texto técnico)
+    # Sanitiza SOMENTE o __pac_raw (remove “paciente = cirurgia” / texto técnico)
     def _sanitize_one(pac_val, cir_val):
         pac = "" if pd.isna(pac_val) else str(pac_val).strip()
         cir = "" if pd.isna(cir_val) else str(cir_val).strip()
@@ -426,7 +424,7 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
         errors="coerce"
     )
 
-    # 4.1) DEDUP HÍBRIDA com os VALORES CRUS (pré-herança)
+    # 4.1) DEDUP HÍBRIDA com VALORES CRUS (pré-herança) e regra PA/PV
     def _norm_blank(series: pd.Series) -> pd.Series:
         return series.fillna("").astype(str).str.strip().str.upper()
 
@@ -436,19 +434,29 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
     D      = _norm_blank(df["Data"])
     PR     = df["Prestador_norm"].fillna("").astype(str)
 
-    df["__dedup_tag"] = np.where(P_raw != "",
-        "P|" + D + "|" + P_raw + "|" + PR,
-        np.where(A_raw != "",
-            "A|" + D + "|" + A_raw + "|" + PR,
-            np.where(V_raw != "",
-                "V|" + D + "|" + V_raw + "|" + PR,
-                "T|" + D + "|" + PR + "|" + df["start_key"].astype(str)
+    # Prioriza PA (Paciente+Atendimento), depois PV (Paciente+Aviso), depois P, A, V e T (tempo)
+    df["__dedup_tag"] = np.where((P_raw != "") & (A_raw != ""),
+        "PA|" + D + "|" + P_raw + "|" + A_raw + "|" + PR,
+        np.where((P_raw != "") & (V_raw != ""),
+            "PV|" + D + "|" + P_raw + "|" + V_raw + "|" + PR,
+            np.where(P_raw != "",
+                "P|"  + D + "|" + P_raw + "|" + PR,
+                np.where(A_raw != "",
+                    "A|" + D + "|" + A_raw + "|" + PR,
+                    np.where(V_raw != "",
+                        "V|" + D + "|" + V_raw + "|" + PR,
+                        "T|" + D + "|" + PR + "|" + df["start_key"].astype(str)
+                    )
+                )
             )
         )
     )
 
     df = df.sort_values(["Data", "Paciente", "Prestador_norm", "start_key"])
     df = df.drop_duplicates(subset=["__dedup_tag"], keep="first")
+
+    # 🔧 Correção: usar o Paciente CRU (sanitizado) no resultado final (evita heranças indevidas)
+    df["Paciente"] = df["__pac_raw"]
 
     # Limpeza de colunas técnicas
     df = df.drop(columns=["__dedup_tag", "__pac_raw", "__att_raw", "__aviso_raw"], errors="ignore")
