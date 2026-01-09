@@ -1,4 +1,4 @@
-# db.py
+
 from sqlalchemy import create_engine, text
 
 DB_PATH = "exemplo.db"
@@ -10,49 +10,68 @@ def get_engine():
 def init_db():
     engine = get_engine()
     with engine.begin() as conn:
-        # Tabela principal com índice de unicidade por (Data, Paciente, Prestador)
+        # Tabela principal agora inclui Hospital, Ano, Mes, Dia
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS pacientes_unicos_por_dia_prestador (
-            Data TEXT,
+            Hospital   TEXT,
+            Ano        INTEGER,
+            Mes        INTEGER,
+            Dia        INTEGER,
+            Data       TEXT,
             Atendimento TEXT,
-            Paciente TEXT,
-            Aviso TEXT,
-            Convenio TEXT,
-            Prestador TEXT,
-            Quarto TEXT
+            Paciente   TEXT,
+            Aviso      TEXT,
+            Convenio   TEXT,
+            Prestador  TEXT,
+            Quarto     TEXT
         );
         """))
+
+        # Índice único: (Data, Paciente, Prestador, Hospital)
+        # mantém a unicidade por dia/paciente/prestador dentro do hospital
         conn.execute(text("""
         CREATE UNIQUE INDEX IF NOT EXISTS idx_unicidade
-        ON pacientes_unicos_por_dia_prestador (Data, Paciente, Prestador);
+        ON pacientes_unicos_por_dia_prestador (Data, Paciente, Prestador, Hospital);
+        """))
+
+        # Índice auxiliar para ordenação/consulta por hospital e calendário
+        conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS idx_hospital_calendario
+        ON pacientes_unicos_por_dia_prestador (Hospital, Ano, Mes, Dia);
         """))
 
 def upsert_dataframe(df):
     """
-    UPSERT (INSERT OR REPLACE) por (Data, Paciente, Prestador).
+    UPSERT (INSERT OR REPLACE) por (Data, Paciente, Prestador, Hospital).
     """
     engine = get_engine()
     with engine.begin() as conn:
         for _, row in df.iterrows():
             conn.execute(text("""
                 INSERT OR REPLACE INTO pacientes_unicos_por_dia_prestador
-                (Data, Atendimento, Paciente, Aviso, Convenio, Prestador, Quarto)
-                VALUES (:Data, :Atendimento, :Paciente, :Aviso, :Convenio, :Prestador, :Quarto)
+                (Hospital, Ano, Mes, Dia, Data, Atendimento, Paciente, Aviso, Convenio, Prestador, Quarto)
+                VALUES (:Hospital, :Ano, :Mes, :Dia, :Data, :Atendimento, :Paciente, :Aviso, :Convenio, :Prestador, :Quarto)
             """), {
-                "Data": str(row.get("Data", "")) if row.get("Data", "") is not None else "",
-                "Atendimento": str(row.get("Atendimento", "")) if row.get("Atendimento", "") is not None else "",
-                "Paciente": str(row.get("Paciente", "")) if row.get("Paciente", "") is not None else "",
-                "Aviso": str(row.get("Aviso", "")) if row.get("Aviso", "") is not None else "",
-                "Convenio": str(row.get("Convenio", "")) if row.get("Convenio", "") is not None else "",
-                "Prestador": str(row.get("Prestador", "")) if row.get("Prestador", "") is not None else "",
-                "Quarto": str(row.get("Quarto", "")) if row.get("Quarto", "") is not None else "",
+                "Hospital":  str(row.get("Hospital", "") or ""),
+                "Ano":       int(row.get("Ano", 0) or 0),
+                "Mes":       int(row.get("Mes", 0) or 0),
+                "Dia":       int(row.get("Dia", 0) or 0),
+                "Data":      str(row.get("Data", "") or ""),
+                "Atendimento": str(row.get("Atendimento", "") or ""),
+                "Paciente":  str(row.get("Paciente", "") or ""),
+                "Aviso":     str(row.get("Aviso", "") or ""),
+                "Convenio":  str(row.get("Convenio", "") or ""),
+                "Prestador": str(row.get("Prestador", "") or ""),
+                "Quarto":    str(row.get("Quarto", "") or ""),
             })
 
 def read_all():
     engine = get_engine()
     with engine.connect() as conn:
-        rs = conn.execute(text("SELECT * FROM pacientes_unicos_por_dia_prestador ORDER BY Data, Paciente, Prestador"))
+        rs = conn.execute(text("""
+            SELECT Hospital, Ano, Mes, Dia, Data, Atendimento, Paciente, Aviso, Convenio, Prestador, Quarto
+            FROM pacientes_unicos_por_dia_prestador
+            ORDER BY Hospital, Ano, Mes, Dia, Paciente, Prestador
+        """))
         rows = rs.fetchall()
     return rows
-
-
