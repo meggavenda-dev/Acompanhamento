@@ -1,6 +1,6 @@
-streamlit==1.38.0
-pandas==2.2.2
-openpyxl==3.1.2
-xlsxwriter==3.1.9
-python-dateutil==2.9.0.post0
-SQLAlchemy==2.0.34
+streamlit
+pandas
+openpyxl
+xlsxwriter
+python-dateutil
+SQLAlchemy
