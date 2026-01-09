@@ -130,7 +130,7 @@ if uploaded_file is not None:
 if st.session_state.df_final is not None and len(st.session_state.df_final) > 0:
     st.success(f"Processamento concluído! Linhas: {len(st.session_state.df_final)}")
 
-    st.subheader("Revisar e editar nomes de Paciente (obrigatório quando vazio)")
+    st.subheader("Revisar e editar nomes de Paciente (opcional)")
     st.caption("Edite apenas a coluna 'Paciente' se necessário. As demais estão bloqueadas para evitar alterações acidentais.")
 
     # Editor com restrição: somente 'Paciente' editável
@@ -138,18 +138,8 @@ if st.session_state.df_final is not None and len(st.session_state.df_final) > 0:
         ["Hospital", "Ano", "Mes", "Dia", "Paciente", "Prestador"]
     ).reset_index(drop=True)
 
-    # Sinalizar pacientes vazios e informar usuário
-    df_to_edit["Paciente_is_blank"] = df_to_edit["Paciente"].astype(str).str.strip() == ""
-    num_blank_pacientes = int(df_to_edit["Paciente_is_blank"].sum())
-    if num_blank_pacientes > 0:
-        st.warning(f"Existem {num_blank_pacientes} linha(s) com 'Paciente' vazio. Preencha os nomes antes de salvar.")
-    else:
-        st.success("Todos os pacientes estão preenchidos.")
-
-    paciente_help = "Clique para editar o nome do paciente. Campos em branco devem ser preenchidos."
-
     edited_df = st.data_editor(
-        df_to_edit.drop(columns=["Paciente_is_blank"]),
+        df_to_edit,
         use_container_width=True,
         num_rows="fixed",  # não permite adicionar linhas
         column_config={
@@ -164,7 +154,7 @@ if st.session_state.df_final is not None and len(st.session_state.df_final) > 0:
             "Prestador": st.column_config.TextColumn(disabled=True),
             "Quarto": st.column_config.TextColumn(disabled=True),
             # Paciente permanece editável
-            "Paciente": st.column_config.TextColumn(help=paciente_help),
+            "Paciente": st.column_config.TextColumn(help="Clique para editar o nome do paciente."),
         },
         hide_index=True,
         key=st.session_state.editor_key  # chave única por importação
@@ -175,18 +165,9 @@ if st.session_state.df_final is not None and len(st.session_state.df_final) > 0:
 
     # ---------------- Gravar no Banco + commit automático no GitHub ----------------
     st.subheader("Persistência")
-
-    # Validação: impedir salvar se houver 'Paciente' vazio
-    blank_mask = st.session_state.df_final["Paciente"].astype(str).str.strip() == ""
-    num_blank_to_save = int(blank_mask.sum())
-    save_disabled = num_blank_to_save > 0
-
-    if save_disabled:
-        st.error("Não é possível salvar enquanto houver pacientes com nome vazio. Preencha todos antes de salvar.")
-
-    if st.button("Salvar no banco (exemplo.db)", disabled=save_disabled):
+    if st.button("Salvar no banco (exemplo.db)"):
         try:
-            # 1) UPSERT local (db.py também valida e bloqueia se houver vazio)
+            # 1) UPSERT local
             upsert_dataframe(st.session_state.df_final)
 
             # 2) Contagem para feedback
