@@ -27,7 +27,7 @@ REQUIRED_COLS = [
     "Convenio", "Quarto"
 ]
 
-# Conjunto de "hints" que indicam que um token provavelmente descreve um procedimento (não um paciente)
+# Conjunto de "hints" que indicam texto de procedimento (não nome de paciente)
 PROCEDURE_HINTS = {
     "HERNIA", "HERNIORRAFIA", "COLECISTECTOMIA", "APENDICECTOMIA",
     "ENDOMETRIOSE", "SINOVECTOMIA", "OSTEOCONDROPLASTIA", "ARTROPLASTIA",
@@ -42,20 +42,21 @@ PROCEDURE_HINTS = {
     "LINFADENECTOMIA", "RECONSTRUÇÃO", "RETOSSIGMOIDECTOMIA", "PLEUROSCOPIA",
 }
 
-def _is_probably_procedure_token(tok: str) -> bool:
+def _is_probably_procedure_token(tok) -> bool:
     """
-    Heurística para sinalizar que um token parece ser texto de procedimento e não nome de pessoa.
+    Heurística para sinalizar que um token parece ser texto de procedimento (não paciente).
+    Evita avaliar boolean de pd.NA.
     """
-    if not tok:
+    if tok is None or pd.isna(tok):
         return False
     T = str(tok).upper().strip()
-    # Sinais fortes de procedimento/painel técnico
+    # Sinais de procedimento/painel técnico
     if any(h in T for h in PROCEDURE_HINTS):
         return True
     # Muitos sinais de "frase técnica"
-    if ("," in T) or ("/" in T) or ("(" in T) or (")" in T) or ("%" in T) or ("  " in T) or ("\\-" in T):
+    if ("," in T) or ("/" in T) or ("(" in T) or (")" in T) or ("%" in T) or ("  " in T) or ("-" in T):
         return True
-    # Muito longo para nome de pessoa (ajuste conforme o seu contexto)
+    # Muito longo para nome de pessoa
     if len(T) > 50:
         return True
     return False
@@ -155,7 +156,7 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
             if h0 - 1 >= 0 and re.fullmatch(r"\d{3,}", tokens[h0 - 1]):
                 aviso = tokens[h0 - 1]
 
-            # Atendimento
+            # Atendimento e Paciente
             atendimento = None
             paciente = None
 
@@ -328,20 +329,27 @@ def _sanitize_patient_field(df: pd.DataFrame) -> pd.DataFrame:
     - Paciente == Cirurgia
     - Paciente contém hints de procedimento
     - Paciente aparenta texto técnico (muito longo / vírgulas / barras / parênteses / traços)
+    (Evita avaliar boolean de pd.NA)
     """
     if df is None or df.empty:
         return df
     df = df.copy()
 
-    def clean_pac(row):
-        pac = str(row.get("Paciente", "") or "").strip()
-        cir = str(row.get("Cirurgia", "") or "").strip()
-        if not pac:
+    def clean_pac(row: pd.Series) -> str:
+        pac_val = row.get("Paciente", pd.NA)
+        cir_val = row.get("Cirurgia", pd.NA)
+
+        pac = "" if pd.isna(pac_val) else str(pac_val).strip()
+        cir = "" if pd.isna(cir_val) else str(cir_val).strip()
+
+        if pac == "":
             return pac  # já está vazio
 
+        # Igual à cirurgia -> não é paciente
         if cir and pac.upper() == cir.upper():
             return ""  # zera
 
+        # Heurística de procedimento
         if _is_probably_procedure_token(pac):
             return ""  # zera
 
@@ -410,14 +418,17 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
     df = _sanitize_patient_field(df)
 
     # 3) Filtro de prestadores (case-insensitive com normalização)
-    def norm(s): return (s or "").strip().upper()
+    def norm(s):
+        s = "" if (s is None or pd.isna(s)) else str(s)
+        return s.strip().upper()
+
     target = [norm(p) for p in prestadores_lista]
 
     # Garante coluna Prestador
     if "Prestador" not in df.columns:
         df["Prestador"] = pd.NA
 
-    df["Prestador_norm"] = df["Prestador"].astype(str).apply(norm)
+    df["Prestador_norm"] = df["Prestador"].apply(norm)
     df = df[df["Prestador_norm"].isin(target)].copy()
 
     # 4) Ordenação por tempo e deduplicação
@@ -432,12 +443,12 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
     )
 
     # Marcação de pacientes pendentes (apenas para apoio; não retorna por padrão)
-    df["Paciente_pendente"] = df["Paciente"].astype(str).str.strip().eq("")
+    df["Paciente_pendente"] = df["Paciente"].isna() | df["Paciente"].astype(str).str.strip().eq("")
 
     # Deduplicação:
     # - NÃO deduplicar linhas com Paciente em branco (mantém todas para facilitar a revisão)
     # - Deduplicar apenas onde Paciente não está em branco, por (Data, Paciente, Prestador_norm)
-    mask_blank_pac = df["Paciente"].astype(str).str.strip().eq("")
+    mask_blank_pac = df["Paciente"].isna() | df["Paciente"].astype(str).str.strip().eq("")
     df_nonblank = df[~mask_blank_pac].sort_values(["Data", "Paciente", "Prestador_norm", "start_key"])
     df_nonblank = df_nonblank.drop_duplicates(subset=["Data", "Paciente", "Prestador_norm"], keep="first")
     df_blank = df[mask_blank_pac]
@@ -446,7 +457,8 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
     df = df.sort_values(["Data", "Paciente", "Prestador_norm", "start_key"])
 
     # 5) Hospital + Ano/Mes/Dia
-    hosp = (selected_hospital or "").strip() or "Hospital não informado"
+    hosp = selected_hospital if (selected_hospital and not pd.isna(selected_hospital)) else ""
+    hosp = hosp.strip() or "Hospital não informado"
     df["Hospital"] = hosp
 
     # Garante coluna Data antes de extrair Ano/Mes/Dia
@@ -473,3 +485,4 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
     # Ordenação para retorno
     out = out.sort_values(["Hospital", "Ano", "Mes", "Dia", "Paciente", "Prestador"]).reset_index(drop=True)
     return out
+
