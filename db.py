@@ -1,4 +1,3 @@
-
 # db.py
 from __future__ import annotations
 
@@ -64,14 +63,14 @@ def init_db():
         ON pacientes_unicos_por_dia_prestador (Hospital, Ano, Mes, Dia);
         """))
 
-        # Índice adicional útil para consultas por hospital+período+prestador
+        # Índice adicional útil para consultas por hospital+período+prestador (opcional, mas ajuda desempenho)
         conn.execute(text("""
         CREATE INDEX IF NOT EXISTS idx_hospital_calendario_prestador
         ON pacientes_unicos_por_dia_prestador (Hospital, Ano, Mes, Dia, Prestador);
         """))
 
 
-def _safe_int(val, default: int = 0) -> int:
+def _safe_int(val, default: int = 0) -&gt; int:
     """
     Converte em int com segurança (None/NaN/strings vazias viram default).
     """
@@ -79,6 +78,7 @@ def _safe_int(val, default: int = 0) -> int:
         return default
     if isinstance(val, float):
         try:
+            # math.isnan só aceita float; se não for, ignora
             if math.isnan(val):
                 return default
         except Exception:
@@ -92,7 +92,7 @@ def _safe_int(val, default: int = 0) -> int:
         return default
 
 
-def _safe_str(val, default: str = "") -> str:
+def _safe_str(val, default: str = "") -&gt; str:
     """
     Converte em str com segurança (None/NaN viram default) e trim.
     """
@@ -110,28 +110,12 @@ def _safe_str(val, default: str = "") -> str:
 def upsert_dataframe(df):
     """
     UPSERT (INSERT OR REPLACE) por (Data, Paciente, Prestador, Hospital).
-
-    GARANTIAS:
-    - ❌ Bloqueia salvamento se existir 'Paciente' vazio (None / '' / espaços)
     - Converte tipos com segurança (int/str)
-    - Normaliza trim para evitar duplicatas
+    - Normaliza trim para evitar duplicatas por espaço/acento
+    - Evita falhas por NaN/None
     """
     if df is None or len(df) == 0:
         return
-
-    # -------- Validação dura: Paciente obrigatório --------
-    if "Paciente" not in df.columns:
-        raise ValueError("Coluna 'Paciente' não encontrada no DataFrame.")
-
-    blank_mask = df["Paciente"].astype(str).str.strip() == ""
-    num_blank = int(blank_mask.sum())
-
-    if num_blank > 0:
-        raise ValueError(
-            f"Existem {num_blank} registro(s) com 'Paciente' vazio. "
-            "Preencha todos os nomes antes de salvar."
-        )
-    # ----------------------------------------------------
 
     engine = get_engine()
     with engine.begin() as conn:
@@ -170,7 +154,7 @@ def read_all():
     return rows
 
 
-# ---------- Utilitários opcionais ----------
+# ---------- Utilitários opcionais (podem ajudar no app) ----------
 
 def read_by_hospital(hospital: str):
     """
@@ -194,14 +178,12 @@ def read_by_hospital_period(hospital: str, ano: Optional[int] = None, mes: Optio
     engine = get_engine()
     where = ["Hospital = :h"]
     params = {"h": hospital}
-
     if ano is not None:
         where.append("Ano = :a")
         params["a"] = int(ano)
     if mes is not None:
         where.append("Mes = :m")
         params["m"] = int(mes)
-
     sql = f"""
         SELECT Hospital, Ano, Mes, Dia, Data, Atendimento, Paciente, Aviso, Convenio, Prestador, Quarto
         FROM pacientes_unicos_por_dia_prestador
