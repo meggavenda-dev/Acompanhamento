@@ -4,17 +4,12 @@ import io
 import csv
 import re
 import pandas as pd
-from dateutil import parser as dtparser  # mantido se quiser evoluir parsing de datas
+from dateutil import parser as dtparser  # (mantido caso queira evoluir parsing de datas)
 
-# ---------------- Padrões/regex ----------------
+# Padrões/regex utilizados
 TIME_RE = re.compile(r"^\d{1,2}:\d{2}$")
 DATE_RE = re.compile(r"\b(\d{2}/\d{2}/\d{4})\b")
 HAS_LETTER_RE = re.compile(r"[A-Za-zÁÉÍÓÚÃÕÇáéíóúãõç]")
-
-# Identificadores para validação
-ID_RE = re.compile(r"^\d{7,10}$")   # Atendimento: 7 a 10 dígitos
-AVISO_RE = re.compile(r"^\d{3,}$")  # Aviso: 3+ dígitos
-
 SECTION_KEYWORDS = ["CENTRO CIRURGICO", "HEMODINAMICA", "CENTRO OBSTETRICO"]
 
 # Colunas esperadas quando o arquivo já vier estruturado
@@ -30,35 +25,26 @@ REQUIRED_COLS = [
     "Aviso", "Convenio", "Quarto"
 ]
 
-# ---------------- Helpers de validação ----------------
-def _has_letters(s: str) -> bool:
-    s = (s or "").strip()
-    return bool(HAS_LETTER_RE.search(s))
-
-def _is_valid_case(row: pd.Series) -> bool:
-    """
-    Mantém apenas linhas que representam um caso real:
-    - Prestador e Data presentes
-    - E pelo menos um dos identificadores: Hora_Inicio OU Atendimento numérico OU Paciente com letras OU Aviso numérico
-    (Evita linhas-resumo/rodapé sem paciente/atendimento/aviso/horário)
-    """
-    prest = str(row.get("Prestador", "") or "").strip()
-    data  = str(row.get("Data", "") or "").strip()
-    if prest == "" or data == "":
-        return False
-
-    has_time  = bool(TIME_RE.match(str(row.get("Hora_Inicio", "") or "")))
-    has_att   = bool(ID_RE.match(str(row.get("Atendimento", "") or "").strip()))
-    has_pac   = _has_letters(str(row.get("Paciente", "") or ""))
-    has_aviso = bool(AVISO_RE.match(str(row.get("Aviso", "") or "").strip()))
-    return has_time or has_att or has_pac or has_aviso
-
 # ---------------- Normalização de colunas ----------------
+
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normaliza cabeçalhos para evitar KeyError:
+    - remove BOM, espaços no início/fim
+    - mapeia sinônimos/acento para nomes esperados
+    """
     if df is None or df.empty:
         return df
-    df = df.copy()
-    df.columns = [str(c).replace("\ufeff", "").strip() for c in df.columns]
+
+    # strip + remove BOM
+    new_cols = []
+    for c in df.columns:
+        s = str(c)
+        s = s.replace("\ufeff", "").strip()
+        new_cols.append(s)
+    df.columns = new_cols
+
+    # mapa de sinônimos comuns -> nomes esperados
     col_map = {
         "Convênio": "Convenio",
         "Convênio*": "Convenio",
@@ -70,27 +56,33 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         "Centro Cirúrgico": "Centro",
     }
     df.rename(columns=col_map, inplace=True)
+
     return df
 
+
 # ---------------- Parser de texto bruto ----------------
+
 def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
     """
-    Lê o CSV 'bruto' linha a linha e extrai campos principais.
+    Parser robusto para CSV 'bruto' (como o 12.2025.csv),
+    realizando leitura linha a linha em ordem original e extraindo campos.
     """
     rows = []
     current_section = None
     current_date_str = None
-    ctx = {'atendimento': None, 'paciente': None, 'aviso': None,
-           'hora_inicio': None, 'hora_fim': None, 'quarto': None}
+    ctx = {
+        'atendimento': None, 'paciente': None, 'aviso': None,
+        'hora_inicio': None, 'hora_fim': None, 'quarto': None
+    }
     row_idx = 0
 
     for line in text.splitlines():
-        # Detecta Data
+        # Detectar Data em qualquer linha
         m_date = DATE_RE.search(line)
         if m_date:
             current_date_str = m_date.group(1)
 
-        # Tokeniza respeitando aspas
+        # Tokenizar respeitando aspas
         tokens = next(csv.reader([line]))
         tokens = [t.strip() for t in tokens]
         if not tokens:
@@ -102,6 +94,7 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
                 if kw in line:
                     current_section = kw
                     break
+            # reset de contexto ao trocar de seção
             ctx = {k: None for k in ctx}
             continue
 
@@ -130,46 +123,24 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
             if h0 - 1 >= 0 and re.fullmatch(r"\d{3,}", tokens[h0 - 1]):
                 aviso = tokens[h0 - 1]
 
-            # Atendimento e Paciente (Paciente = token imediatamente após Atendimento)
+            # Atendimento e Paciente
             for i, t in enumerate(tokens):
-                if re.fullmatch(r"\d{7,10}", t):  # Atendimento (7 a 10 dígitos)
+                if re.fullmatch(r"\d{7,10}", t):
                     atendimento = t
-                    if i + 1 < len(tokens):
-                        pj = tokens[i + 1].strip()
-                        # Paciente só é válido se tiver letras e NÃO for um horário
-                        if pj and HAS_LETTER_RE.search(pj) and not TIME_RE.match(pj):
-                            paciente = pj
-                        else:
-                            paciente = None
-                    else:
-                        paciente = None
+                    for j in range(i + 1, len(tokens)):
+                        tj = tokens[j]
+                        if tj and HAS_LETTER_RE.search(tj) and not TIME_RE.match(tj):
+                            paciente = tj
+                            break
                     break
 
-            # --- Mapear tail ancorando pela direita ---
             base_idx = h1 if h1 is not None else h0
-            tail = [t for t in tokens[base_idx + 1:] if t != ""]
-            cirurgia = convenio = prestador = anestesista = tipo = quarto = None
-            if len(tail) >= 5:
-                # Últimos 5 tokens: Convênio, Prestador, Anestesista, Tipo_Anestesia, Quarto
-                convenio, prestador, anestesista, tipo, quarto = tail[-5:]
-                # O restante à esquerda forma a Cirurgia
-                cirurgia = " ".join(tail[:-5]).strip() or None
-            else:
-                # Fallback conservador (layout incompleto)
-                cirurgia = tokens[base_idx + 1] if base_idx + 1 < len(tokens) else None
-                convenio = tokens[base_idx + 2] if base_idx + 2 < len(tokens) else None
-                prestador = tokens[base_idx + 3] if base_idx + 3 < len(tokens) else None
-                anestesista = tokens[base_idx + 4] if base_idx + 4 < len(tokens) else None
-                tipo = tokens[base_idx + 5] if base_idx + 5 < len(tokens) else None
-                quarto = tokens[base_idx + 6] if base_idx + 6 < len(tokens) else None
-
-            # Sanitizações leves
-            def _clean(v): return (v.strip() or None) if isinstance(v, str) else v
-            prestador = _clean(prestador)
-            anestesista = _clean(anestesista)
-            convenio = _clean(convenio)
-            tipo = _clean(tipo)
-            quarto = _clean(quarto)
+            cirurgia = tokens[base_idx + 1] if base_idx + 1 < len(tokens) else None
+            convenio = tokens[base_idx + 2] if base_idx + 2 < len(tokens) else None
+            prestador = tokens[base_idx + 3] if base_idx + 3 < len(tokens) else None
+            anestesista = tokens[base_idx + 4] if base_idx + 4 < len(tokens) else None
+            tipo = tokens[base_idx + 5] if base_idx + 5 < len(tokens) else None
+            quarto = tokens[base_idx + 6] if base_idx + 6 < len(tokens) else None
 
             rows.append({
                 "Centro": current_section,
@@ -187,6 +158,14 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
                 "Quarto": quarto,
                 "_row_idx": row_idx
             })
+            # Atualiza contexto para possíveis linhas subsequentes sem horário
+            ctx['atendimento'] = atendimento
+            ctx['paciente'] = paciente
+            ctx['aviso'] = aviso
+            ctx['hora_inicio'] = hora_inicio
+            ctx['hora_fim'] = hora_fim
+            ctx['quarto'] = quarto
+
             row_idx += 1
             continue
 
@@ -221,12 +200,11 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
 
     return pd.DataFrame(rows)
 
-# ---------------- Herança por data mantendo ordem original ----------------
+
 def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Herança linha-a-linha por Data com salvaguardas:
-      - NÃO herdar Paciente em linhas com horário quando veio vazio.
-      - Herdar SOMENTE do último atendimento COM horário do mesmo Prestador (por Data).
+    Herança linha-a-linha por Data, preservando ordem original do arquivo.
+    Quando há Prestador e (Atendimento/Paciente/Aviso) vazios, herda do último acima.
     """
     if df is None or df.empty:
         return df
@@ -234,76 +212,58 @@ def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.replace({"": pd.NA}, inplace=True)
 
+    # Garante índice de ordem
     if "_row_idx" not in df.columns:
         df["_row_idx"] = range(len(df))
 
+    # Se não há coluna Data, não há herança por dia — retorna DF como está
     if "Data" not in df.columns:
         return df
 
+    # Preenche datas ausentes
     df["Data"] = df["Data"].ffill().bfill()
 
+    # Varre por data na ordem original
     for _, grp in df.groupby("Data", sort=False):
-        # Mapas por prestador (atualizados APENAS quando a linha tem horário)
-        last_att_by_prest = {}
-        last_pac_by_prest = {}
-        last_aviso_by_prest = {}
-
+        last_att = last_pac = last_aviso = None
         for i in grp.sort_values("_row_idx").index:
-            att   = df.at[i, "Atendimento"] if "Atendimento" in df.columns else None
-            pac   = df.at[i, "Paciente"] if "Paciente" in df.columns else None
-            aviso = df.at[i, "Aviso"] if "Aviso" in df.columns else None
-            prest = df.at[i, "Prestador"] if "Prestador" in df.columns else None
-            has_time = "Hora_Inicio" in df.columns and pd.notna(df.at[i, "Hora_Inicio"])
+            att = df.at[i, "Atendimento"] if "Atendimento" in df.columns else None
+            pac = df.at[i, "Paciente"] if "Paciente" in df.columns else None
+            av = df.at[i, "Aviso"] if "Aviso" in df.columns else None
+            if pd.notna(att): last_att = att
+            if pd.notna(pac): last_pac = pac
+            if pd.notna(av): last_aviso = av
 
-            # Flags do conteúdo ORIGINAL
-            att_orig_blank  = bool(df.at[i, "_orig_att_blank"])  if "_orig_att_blank"  in df.columns else pd.isna(att)
-            pac_orig_blank  = bool(df.at[i, "_orig_pac_blank"])  if "_orig_pac_blank"  in df.columns else pd.isna(pac)
-            av_orig_blank   = bool(df.at[i, "_orig_av_blank"])   if "_orig_av_blank"   in df.columns else pd.isna(aviso)
-            data_orig_blank = bool(df.at[i, "_orig_data_blank"]) if "_orig_data_blank" in df.columns else False
-
-            att_orig_filled = not att_orig_blank
-            data_orig_filled = not data_orig_blank
-
-            # Atualizações APENAS quando há horário (definem "caso" do prestador)
-            if has_time:
-                if pd.notna(att):   last_att_by_prest[prest]   = att
-                if pd.notna(pac):   last_pac_by_prest[prest]   = pac
-                if pd.notna(aviso): last_aviso_by_prest[prest] = aviso
-
-            # Salvaguarda: sem prestador, não tentamos herdar
-            if not (isinstance(prest, str) and prest.strip()):
-                continue
-
-            # 1) Linha com horário e Paciente vazio -> NUNCA herdar Paciente
-            if has_time and pac_orig_blank:
-                continue
-
-            # 2) Atendimento+Data vieram preenchidos e Paciente vazio -> NÃO herdar Paciente
-            if att_orig_filled and data_orig_filled and pac_orig_blank:
-                continue
-
-            # 3) Linhas sem horário: herdar somente do último atendimento COM horário do mesmo prestador
-            if (not has_time) and att_orig_blank and pac_orig_blank and av_orig_blank:
-                src_att   = last_att_by_prest.get(prest, None)
-                src_pac   = last_pac_by_prest.get(prest, None)
-                src_aviso = last_aviso_by_prest.get(prest, None)
-
-                if "Atendimento" in df.columns and pd.notna(src_att):
-                    df.at[i, "Atendimento"] = src_att
-                if "Paciente" in df.columns and pd.notna(src_pac):
-                    df.at[i, "Paciente"] = src_pac
-                if "Aviso" in df.columns and pd.notna(src_aviso):
-                    df.at[i, "Aviso"] = src_aviso
-
+            if "Prestador" in df.columns and pd.notna(df.at[i, "Prestador"]):
+                if "Atendimento" in df.columns and pd.isna(att):
+                    df.at[i, "Atendimento"] = last_att
+                if "Paciente" in df.columns and pd.isna(pac):
+                    df.at[i, "Paciente"] = last_pac
+                if "Aviso" in df.columns and pd.isna(av):
+                    df.at[i, "Aviso"] = last_aviso
     return df
 
-# ---------------- Função principal ----------------
+
+# ------------------ Função principal ------------------
+
 def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
+    """
+    Entrada:
+      - upload: arquivo enviado pelo Streamlit (CSV/Excel/Texto)
+      - prestadores_lista: lista de prestadores alvo (strings)
+      - selected_hospital: nome do Hospital informado no app (aplicado a todas as linhas)
+
+    Saída:
+      DataFrame final com colunas:
+        Hospital, Ano, Mes, Dia, Data, Atendimento, Paciente, Aviso, Convenio, Prestador, Quarto
+    """
     name = upload.name.lower()
 
     # 1) Ler arquivo (CSV/Excel ou texto bruto)
-    if name.endswith(".xlsx") or name.endswith(".xls"):
+    if name.endswith(".xlsx"):
         df_in = pd.read_excel(upload, engine="openpyxl")
+    elif name.endswith(".xls"):
+        df_in = pd.read_excel(upload, engine="xlrd")
     elif name.endswith(".csv"):
         try:
             df_in = pd.read_csv(upload, sep=",", encoding="utf-8")
@@ -326,24 +286,13 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
         df_in["_row_idx"] = range(len(df_in))
     for c in REQUIRED_COLS:
         if c not in df_in.columns:
+            # cria coluna vazia com alinhamento de índice
             df_in[c] = pd.NA
 
-    # >>> Flags do conteúdo original (antes de herdar/ffill)
-    df_in["_orig_att_blank"]  = df_in["Atendimento"].isna() | (df_in["Atendimento"].astype(str).str.strip() == "")
-    df_in["_orig_pac_blank"]  = df_in["Paciente"].isna()    | (df_in["Paciente"].astype(str).str.strip()    == "")
-    df_in["_orig_av_blank"]   = df_in["Aviso"].isna()       | (df_in["Aviso"].astype(str).str.strip()       == "")
-    df_in["_orig_data_blank"] = df_in["Data"].isna()        | (df_in["Data"].astype(str).str.strip()        == "")
-
-    # 2) Herança por Data (com salvaguardas por prestador)
+    # 2) Herança linha-a-linha por Data
     df = _herdar_por_data_ordem_original(df_in)
 
-    # --- SANITIZAÇÃO: Paciente nunca deve ser numérico puro ---
-    df["Paciente"] = df["Paciente"].apply(lambda x: None if str(x or "").strip().isdigit() else x)
-
-    # --- FILTRO: remover linhas-resumo/rodapé sem identificadores reais ---
-    df = df[df.apply(_is_valid_case, axis=1)].copy()
-
-    # 3) Filtro de prestadores (case-insensitive com normalização)
+    # 3) Filtros dos prestadores (case-insensitive com normalização)
     def normalize(s): return (s or "").strip().upper()
     target = [normalize(p) for p in prestadores_lista]
     # Garante coluna Prestador
@@ -353,6 +302,7 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
     df = df[df["Prestador_norm"].isin(target)].copy()
 
     # 4) Ordenação por tempo e deduplicação por (Data, Paciente, Prestador)
+    # Garante coluna Hora_Inicio
     hora_inicio = df["Hora_Inicio"] if "Hora_Inicio" in df.columns else pd.Series("", index=df.index)
     data_series = df["Data"] if "Data" in df.columns else pd.Series("", index=df.index)
 
@@ -361,7 +311,7 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
         format="%d/%m/%Y %H:%M",
         errors="coerce"
     )
-    df = df.sort_values(["Data", "Paciente", "Prestador_norm", "start_key", "_row_idx"]).copy()
+    df = df.sort_values(["Data", "Paciente", "Prestador_norm", "start_key"]).copy()
     df = df.drop_duplicates(subset=["Data", "Paciente", "Prestador_norm"], keep="first")
 
     # 5) Hospital informado + Ano/Mes/Dia
@@ -377,7 +327,7 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
     df["Mes"] = dt.dt.month
     df["Dia"] = dt.dt.day
 
-    # 6) Seleção das colunas finais
+    # 6) Seleção das colunas finais (organizado por ano/mês/dia)
     final_cols = [
         "Hospital", "Ano", "Mes", "Dia",
         "Data", "Atendimento", "Paciente", "Aviso",
@@ -391,4 +341,3 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
     # Ordenação para retorno (ano/mês/dia)
     out = out.sort_values(["Hospital", "Ano", "Mes", "Dia", "Paciente", "Prestador"]).reset_index(drop=True)
     return out
-
