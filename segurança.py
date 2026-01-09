@@ -341,3 +341,8 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
     # Ordenação para retorno (ano/mês/dia)
     out = out.sort_values(["Hospital", "Ano", "Mes", "Dia", "Paciente", "Prestador"]).reset_index(drop=True)
     return out
+
+
+# BACKUP 2222222222222222
+
+
