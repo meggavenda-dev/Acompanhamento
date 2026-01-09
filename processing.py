@@ -4,22 +4,24 @@ import io
 import csv
 import re
 import pandas as pd
-from dateutil import parser as dtparser
+from dateutil import parser as dtparser  # (mantido caso queira evoluir parsing de datas)
 
+# Padrões/regex utilizados
 TIME_RE = re.compile(r"^\d{1,2}:\d{2}$")
 DATE_RE = re.compile(r"\b(\d{2}/\d{2}/\d{4})\b")
 HAS_LETTER_RE = re.compile(r"[A-Za-zÁÉÍÓÚÃÕÇáéíóúãõç]")
 SECTION_KEYWORDS = ["CENTRO CIRURGICO", "HEMODINAMICA", "CENTRO OBSTETRICO"]
 
+# Colunas esperadas quando o arquivo já vier estruturado
 EXPECTED_COLS = [
     "Centro","Data","Atendimento","Paciente","Aviso",
     "Hora_Inicio","Hora_Fim","Cirurgia","Convenio","Prestador",
     "Anestesista","Tipo_Anestesia","Quarto"
 ]
 
-def _parse_raw_text_to_rows(text: str):
+def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
     """
-    Parser robusto para CSV 'bruto' (como o seu 12.2025.csv),
+    Parser robusto para CSV 'bruto' (como o 12.2025.csv),
     realizando leitura linha a linha em ordem original e extraindo campos.
     """
     rows = []
@@ -27,6 +29,7 @@ def _parse_raw_text_to_rows(text: str):
     current_date_str = None
     ctx = {'atendimento': None, 'paciente': None, 'aviso': None,
            'hora_inicio': None, 'hora_fim': None, 'quarto': None}
+    row_idx = 0
 
     for line in text.splitlines():
         # Detectar Data em qualquer linha
@@ -37,7 +40,6 @@ def _parse_raw_text_to_rows(text: str):
         # Tokenizar respeitando aspas
         tokens = next(csv.reader([line]))
         tokens = [t.strip() for t in tokens]
-
         if not tokens:
             continue
 
@@ -105,8 +107,10 @@ def _parse_raw_text_to_rows(text: str):
                 "Prestador": prestador,
                 "Anestesista": anestesista,
                 "Tipo_Anestesia": tipo,
-                "Quarto": quarto
+                "Quarto": quarto,
+                "_row_idx": row_idx
             })
+            row_idx += 1
             continue
 
         # Linhas sem horário (procedimentos adicionais)
@@ -133,8 +137,10 @@ def _parse_raw_text_to_rows(text: str):
                     "Prestador": prestador,
                     "Anestesista": anestesista,
                     "Tipo_Anestesia": tipo,
-                    "Quarto": quarto
+                    "Quarto": quarto,
+                    "_row_idx": row_idx
                 })
+                row_idx += 1
 
     return pd.DataFrame(rows)
 
@@ -149,7 +155,7 @@ def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
     if "Data" in df.columns:
         df["Data"] = df["Data"].ffill().bfill()
 
-    df["_row_idx"] = range(len(df))
+    # Varre por data na ordem original
     for data_val, grp in df.groupby("Data", sort=False):
         last_att = last_pac = last_aviso = None
         for i in grp.sort_values("_row_idx").index:
@@ -167,23 +173,73 @@ def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
                     df.at[i, "Paciente"] = last_pac
                 if "Aviso" in df.columns and pd.isna(av):
                     df.at[i, "Aviso"] = last_aviso
-    return df.drop(columns=["_row_idx"])
+    return df
 
 
-def process_uploaded_file(upload, prestadores_lista):
+# ------------------ Hospital (regras) + Ano/Mes/Dia ------------------
+
+def _parse_hospital_rules(rules_text: str):
     """
-    Entrada: arquivo do Streamlit (BytesIO) e lista de prestadores.
-    Saída: DataFrame final pronto (Data, Atendimento, Paciente, Aviso, Convenio, Prestador, Quarto).
+    Regras no formato:
+        PADRAO_TEXTO => Nome do Hospital
+
+    Exemplo:
+        BGS SANTA LUCIA => Hospital Santa Lucia Sul
+        HOSPITAL SANTA LUCIA NORTE => Hospital Santa Lucia Norte
+        BGS OBRA MARIA AUXILI => Hospital Maria Auxiliadora
+    """
+    rules = []
+    for line in (rules_text or "").splitlines():
+        if "=>" in line:
+            pat, name = line.split("=>", 1)
+            pat = pat.strip().upper()
+            name = name.strip()
+            if pat and name:
+                rules.append((pat, name))
+    return rules
+
+def infer_hospital(row: pd.Series, rules) -> str:
+    """
+    Inferir Hospital pesquisando o padrão em Convênio, Centro e Quarto (case-insensitive).
+    """
+    candidates = []
+    for col in ["Convenio", "Centro", "Quarto"]:
+        val = str(row.get(col, "") or "").upper()
+        if val:
+            candidates.append(val)
+
+    for pat, name in rules:
+        for c in candidates:
+            if pat in c:
+                return name
+    return "Não mapeado"
+
+
+# ------------------ Função principal ------------------
+
+def process_uploaded_file(upload, prestadores_lista, hospital_rules_text):
+    """
+    Entrada:
+      - upload: arquivo enviado pelo Streamlit (CSV/Excel/Texto)
+      - prestadores_lista: lista de prestadores alvo (strings)
+      - hospital_rules_text: regras "pattern => nome" para mapear Hospital
+
+    Saída:
+      DataFrame final com colunas:
+        Hospital, Ano, Mes, Dia, Data, Atendimento, Paciente, Aviso, Convenio, Prestador, Quarto
     """
     name = upload.name.lower()
-    # 1) Ler arquivo
+
+    # 1) Ler arquivo (CSV/Excel ou texto bruto)
     if name.endswith(".xlsx") or name.endswith(".xls"):
         df_in = pd.read_excel(upload, engine="openpyxl")
+        # se vier estruturado, adiciona índice de ordem relativo para herança
+        if "_row_idx" not in df_in.columns:
+            df_in["_row_idx"] = range(len(df_in))
     elif name.endswith(".csv"):
-        # tenta ler como CSV estruturado; se falhar, cai para parser bruto
         try:
             df_in = pd.read_csv(upload, sep=",", encoding="utf-8")
-            # Se não tem as colunas esperadas, fazer parsing bruto
+            # Se não tem colunas suficientes, parseia como texto bruto
             if len(set(EXPECTED_COLS) & set(df_in.columns)) < 6:
                 upload.seek(0)
                 text = upload.read().decode("utf-8", errors="ignore")
@@ -193,7 +249,6 @@ def process_uploaded_file(upload, prestadores_lista):
             text = upload.read().decode("utf-8", errors="ignore")
             df_in = _parse_raw_text_to_rows(text)
     else:
-        # tenta parsear como texto bruto
         text = upload.read().decode("utf-8", errors="ignore")
         df_in = _parse_raw_text_to_rows(text)
 
@@ -203,7 +258,7 @@ def process_uploaded_file(upload, prestadores_lista):
     # 3) Filtros dos prestadores (case-insensitive com normalização)
     def normalize(s): return (s or "").strip().upper()
     target = [normalize(p) for p in prestadores_lista]
-    df["Prestador_norm"] = df["Prestador"].apply(lambda s: normalize(s))
+    df["Prestador_norm"] = df["Prestador"].apply(normalize)
     df = df[df["Prestador_norm"].isin(target)].copy()
 
     # 4) Ordenação por tempo e deduplicação por (Data, Paciente, Prestador)
@@ -212,14 +267,27 @@ def process_uploaded_file(upload, prestadores_lista):
         format="%d/%m/%Y %H:%M",
         errors="coerce"
     )
-    df = df.sort_values(["Data","Paciente","Prestador_norm","start_key"]).copy()
-    df = df.drop_duplicates(subset=["Data","Paciente","Prestador_norm"], keep="first")
+    df = df.sort_values(["Data", "Paciente", "Prestador_norm", "start_key"]).copy()
+    df = df.drop_duplicates(subset=["Data", "Paciente", "Prestador_norm"], keep="first")
 
-    # 5) Seleção das colunas finais
-    final_cols = ["Data","Atendimento","Paciente","Aviso","Convenio","Prestador","Quarto"]
+    # 5) Hospital + Ano/Mes/Dia
+    rules = _parse_hospital_rules(hospital_rules_text)
+    df["Hospital"] = df.apply(lambda r: infer_hospital(r, rules), axis=1)
+
+    dt = pd.to_datetime(df["Data"], format="%d/%m/%Y", errors="coerce")
+    df["Ano"] = dt.dt.year
+    df["Mes"] = dt.dt.month
+    df["Dia"] = dt.dt.day
+
+    # 6) Seleção das colunas finais (organizado por ano/mês/dia)
+    final_cols = ["Hospital", "Ano", "Mes", "Dia",
+                  "Data", "Atendimento", "Paciente", "Aviso",
+                  "Convenio", "Prestador", "Quarto"]
     for c in final_cols:
         if c not in df.columns:
             df[c] = pd.NA
     out = df[final_cols].copy()
-    return out
 
+    # Ordenação para retorno (ano/mês/dia)
+    out = out.sort_values(["Hospital", "Ano", "Mes", "Dia", "Paciente", "Prestador"]).reset_index(drop=True)
+    return out
