@@ -14,9 +14,9 @@ SECTION_KEYWORDS = ["CENTRO CIRURGICO", "HEMODINAMICA", "CENTRO OBSTETRICO"]
 
 # Colunas esperadas quando o arquivo já vier estruturado
 EXPECTED_COLS = [
-    "Centro","Data","Atendimento","Paciente","Aviso",
-    "Hora_Inicio","Hora_Fim","Cirurgia","Convenio","Prestador",
-    "Anestesista","Tipo_Anestesia","Quarto"
+    "Centro", "Data", "Atendimento", "Paciente", "Aviso",
+    "Hora_Inicio", "Hora_Fim", "Cirurgia", "Convenio", "Prestador",
+    "Anestesista", "Tipo_Anestesia", "Quarto"
 ]
 
 # Colunas mínimas que o pipeline usa (vamos garantir mesmo que vazias)
@@ -26,7 +26,6 @@ REQUIRED_COLS = [
 ]
 
 # ---------------- Normalização de colunas ----------------
-
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
     Normaliza cabeçalhos para evitar KeyError:
@@ -61,7 +60,6 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------- Parser de texto bruto ----------------
-
 def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
     """
     Parser robusto para CSV 'bruto' (como o 12.2025.csv),
@@ -70,8 +68,10 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
     rows = []
     current_section = None
     current_date_str = None
-    ctx = {'atendimento': None, 'paciente': None, 'aviso': None,
-           'hora_inicio': None, 'hora_fim': None, 'quarto': None}
+    ctx = {
+        'atendimento': None, 'paciente': None, 'aviso': None,
+        'hora_inicio': None, 'hora_fim': None, 'quarto': None
+    }
     row_idx = 0
 
     for line in text.splitlines():
@@ -96,8 +96,10 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
             continue
 
         # Ignora cabeçalhos/rodapés
-        header_phrases = ['Hora','Atendimento','Paciente','Convênio','Prestador',
-                          'Anestesista','Tipo Anestesia','Total','Total Geral']
+        header_phrases = [
+            'Hora', 'Atendimento', 'Paciente', 'Convênio', 'Prestador',
+            'Anestesista', 'Tipo Anestesia', 'Total', 'Total Geral'
+        ]
         if any(h in line for h in header_phrases):
             continue
 
@@ -118,15 +120,21 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
             if h0 - 1 >= 0 and re.fullmatch(r"\d{3,}", tokens[h0 - 1]):
                 aviso = tokens[h0 - 1]
 
-            # Atendimento e Paciente
+            # Atendimento e Paciente (AGORA: Paciente = APENAS o token imediatamente após Atendimento)
             for i, t in enumerate(tokens):
+                # Atendimento = número de 7 a 10 dígitos
                 if re.fullmatch(r"\d{7,10}", t):
                     atendimento = t
-                    for j in range(i+1, len(tokens)):
-                        tj = tokens[j]
-                        if tj and HAS_LETTER_RE.search(tj) and not TIME_RE.match(tj):
-                            paciente = tj
-                            break
+                    # Paciente é apenas o token seguinte à coluna Atendimento
+                    if i + 1 < len(tokens):
+                        pj = tokens[i + 1].strip()
+                        # Paciente só é válido se tiver letras e NÃO for um horário
+                        if pj and HAS_LETTER_RE.search(pj) and not TIME_RE.match(pj):
+                            paciente = pj
+                        else:
+                            paciente = None  # veio vazio no arquivo -> mantém vazio
+                    else:
+                        paciente = None
                     break
 
             base_idx = h1 if h1 is not None else h0
@@ -246,7 +254,7 @@ def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
 
             # Regra 1: Atendimento e Data vieram preenchidos, Paciente veio vazio => NÃO herdar Paciente
             if att_orig_filled and data_orig_filled and pac_orig_blank:
-                # Não herda paciente nem os demais nesta condição específica (mantém como está)
+                # Não herda paciente nesta condição específica
                 continue
 
             # Regra 2: Os três vieram vazios no original => herdar todos
@@ -262,7 +270,6 @@ def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ------------------ Função principal (sem inferência por regras) ------------------
-
 def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
     """
     Entrada:
@@ -322,13 +329,7 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
     df["Prestador_norm"] = df["Prestador"].astype(str).apply(normalize)
     df = df[df["Prestador_norm"].isin(target)].copy()
 
-    # Remove colunas auxiliares (_orig_*) para não poluir a saída
-    for aux in ["_orig_att_blank","_orig_pac_blank","_orig_av_blank","_orig_data_blank","_row_idx"]:
-        if aux in df.columns:
-            pass  # mantemos _row_idx para ordenação; removemos os _orig no final (abaixo)
-
     # 4) Ordenação por tempo e deduplicação por (Data, Paciente, Prestador)
-    # Garante coluna Hora_Inicio
     hora_inicio = df["Hora_Inicio"] if "Hora_Inicio" in df.columns else pd.Series("", index=df.index)
     data_series = df["Data"] if "Data" in df.columns else pd.Series("", index=df.index)
 
@@ -354,9 +355,11 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
     df["Dia"] = dt.dt.day
 
     # 6) Seleção das colunas finais (organizado por ano/mês/dia)
-    final_cols = ["Hospital", "Ano", "Mes", "Dia",
-                  "Data", "Atendimento", "Paciente", "Aviso",
-                  "Convenio", "Prestador", "Quarto"]
+    final_cols = [
+        "Hospital", "Ano", "Mes", "Dia",
+        "Data", "Atendimento", "Paciente", "Aviso",
+        "Convenio", "Prestador", "Quarto"
+    ]
     for c in final_cols:
         if c not in df.columns:
             df[c] = pd.NA
