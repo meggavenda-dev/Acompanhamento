@@ -19,6 +19,49 @@ EXPECTED_COLS = [
     "Anestesista","Tipo_Anestesia","Quarto"
 ]
 
+# Colunas mínimas que o pipeline usa (vamos garantir mesmo que vazias)
+REQUIRED_COLS = [
+    "Data", "Prestador", "Hora_Inicio", "Atendimento", "Paciente",
+    "Aviso", "Convenio", "Quarto"
+]
+
+# ---------------- Normalização de colunas ----------------
+
+def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normaliza cabeçalhos para evitar KeyError:
+    - remove BOM, espaços no início/fim
+    - mapeia sinônimos/acento para nomes esperados
+    """
+    if df is None or df.empty:
+        return df
+
+    # strip + remove BOM
+    new_cols = []
+    for c in df.columns:
+        s = str(c)
+        s = s.replace("\ufeff", "").strip()
+        new_cols.append(s)
+    df.columns = new_cols
+
+    # mapa de sinônimos comuns -> nomes esperados
+    col_map = {
+        "Convênio": "Convenio",
+        "Convênio*": "Convenio",
+        "Tipo Anestesia": "Tipo_Anestesia",
+        "Hora Inicio": "Hora_Inicio",
+        "Hora Início": "Hora_Inicio",
+        "Hora Fim": "Hora_Fim",
+        "Centro Cirurgico": "Centro",
+        "Centro Cirúrgico": "Centro",
+    }
+    df.rename(columns=col_map, inplace=True)
+
+    return df
+
+
+# ---------------- Parser de texto bruto ----------------
+
 def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
     """
     Parser robusto para CSV 'bruto' (como o 12.2025.csv),
@@ -44,7 +87,7 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
             continue
 
         # Detecta seção
-        if "Centro Cirurgico" in line:
+        if "Centro Cirurgico" in line or "Centro Cirúrgico" in line:
             for kw in SECTION_KEYWORDS:
                 if kw in line:
                     current_section = kw
@@ -150,13 +193,25 @@ def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
     Herança linha-a-linha por Data, preservando ordem original do arquivo.
     Quando há Prestador e (Atendimento/Paciente/Aviso) vazios, herda do último acima.
     """
+    if df is None or df.empty:
+        return df
+
     df = df.copy()
     df.replace({"": pd.NA}, inplace=True)
-    if "Data" in df.columns:
-        df["Data"] = df["Data"].ffill().bfill()
+
+    # Garante índice de ordem
+    if "_row_idx" not in df.columns:
+        df["_row_idx"] = range(len(df))
+
+    # Se não há coluna Data, não há herança por dia — retorna DF como está
+    if "Data" not in df.columns:
+        return df
+
+    # Preenche datas ausentes
+    df["Data"] = df["Data"].ffill().bfill()
 
     # Varre por data na ordem original
-    for data_val, grp in df.groupby("Data", sort=False):
+    for _, grp in df.groupby("Data", sort=False):
         last_att = last_pac = last_aviso = None
         for i in grp.sort_values("_row_idx").index:
             att = df.at[i, "Atendimento"] if "Atendimento" in df.columns else None
@@ -194,9 +249,6 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
     # 1) Ler arquivo (CSV/Excel ou texto bruto)
     if name.endswith(".xlsx") or name.endswith(".xls"):
         df_in = pd.read_excel(upload, engine="openpyxl")
-        # se vier estruturado, adiciona índice de ordem relativo para herança
-        if "_row_idx" not in df_in.columns:
-            df_in["_row_idx"] = range(len(df_in))
     elif name.endswith(".csv"):
         try:
             df_in = pd.read_csv(upload, sep=",", encoding="utf-8")
@@ -213,18 +265,34 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
         text = upload.read().decode("utf-8", errors="ignore")
         df_in = _parse_raw_text_to_rows(text)
 
+    # 1.1) Normaliza colunas e garante mínimas
+    df_in = _normalize_columns(df_in)
+    if "_row_idx" not in df_in.columns:
+        df_in["_row_idx"] = range(len(df_in))
+    for c in REQUIRED_COLS:
+        if c not in df_in.columns:
+            # cria coluna vazia com alinhamento de índice
+            df_in[c] = pd.NA
+
     # 2) Herança linha-a-linha por Data
     df = _herdar_por_data_ordem_original(df_in)
 
     # 3) Filtros dos prestadores (case-insensitive com normalização)
     def normalize(s): return (s or "").strip().upper()
     target = [normalize(p) for p in prestadores_lista]
-    df["Prestador_norm"] = df["Prestador"].apply(normalize)
+    # Garante coluna Prestador
+    if "Prestador" not in df.columns:
+        df["Prestador"] = pd.NA
+    df["Prestador_norm"] = df["Prestador"].astype(str).apply(normalize)
     df = df[df["Prestador_norm"].isin(target)].copy()
 
     # 4) Ordenação por tempo e deduplicação por (Data, Paciente, Prestador)
+    # Garante coluna Hora_Inicio
+    hora_inicio = df["Hora_Inicio"] if "Hora_Inicio" in df.columns else pd.Series("", index=df.index)
+    data_series = df["Data"] if "Data" in df.columns else pd.Series("", index=df.index)
+
     df["start_key"] = pd.to_datetime(
-        df["Data"].fillna("") + " " + df.get("Hora_Inicio", "").fillna(""),
+        data_series.fillna("").astype(str) + " " + hora_inicio.fillna("").astype(str),
         format="%d/%m/%Y %H:%M",
         errors="coerce"
     )
@@ -232,10 +300,12 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
     df = df.drop_duplicates(subset=["Data", "Paciente", "Prestador_norm"], keep="first")
 
     # 5) Hospital informado + Ano/Mes/Dia
-    hosp = (selected_hospital or "").strip()
-    if not hosp:
-        hosp = "Hospital não informado"
+    hosp = (selected_hospital or "").strip() or "Hospital não informado"
     df["Hospital"] = hosp
+
+    # Garante coluna Data antes de extrair Ano/Mes/Dia
+    if "Data" not in df.columns:
+        df["Data"] = pd.NA
 
     dt = pd.to_datetime(df["Data"], format="%d/%m/%Y", errors="coerce")
     df["Ano"] = dt.dt.year
