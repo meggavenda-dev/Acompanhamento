@@ -27,6 +27,39 @@ REQUIRED_COLS = [
     "Convenio", "Quarto"
 ]
 
+# Conjunto de "hints" que indicam que um token provavelmente descreve um procedimento (não um paciente)
+PROCEDURE_HINTS = {
+    "HERNIA", "HERNIORRAFIA", "COLECISTECTOMIA", "APENDICECTOMIA",
+    "ENDOMETRIOSE", "SINOVECTOMIA", "OSTEOCONDROPLASTIA", "ARTROPLASTIA",
+    "ADENOIDECTOMIA", "AMIGDALECTOMIA", "ETMOIDECTOMIA", "SEPTOPLASTIA",
+    "TURBINECTOMIA", "MIOMECTOMIA", "HISTEROSCOPIA", "HISTERECTOMIA",
+    "ENXERTO", "TENOLISE", "MICRONEUROLISE", "URETERO", "NEFRECTOMIA",
+    "LAPAROTOMIA", "LAPAROSCOPICA", "ROBOTICA", "BIOPSIA", "CRANIOTOMIA",
+    "RETIRADA", "DRENAGEM", "FISTULECTOMIA", "HEMOSTA", "ARTRODESE",
+    "OSTEOTOMIA", "SEPTOPLASTA", "CIRURGIA", "EXERESE", "RESSECCAO",
+    "URETEROLITOTRIPSIA", "URETEROSCOPIA", "ENDOSCOPICA", "ENDOSCOPIA",
+    "CATETER", "AMIGDALECTOMIA LINGUAL", "CERVICOTOMIA", "TIREOIDECTOMIA",
+    "LINFADENECTOMIA", "RECONSTRUÇÃO", "RETOSSIGMOIDECTOMIA", "PLEUROSCOPIA",
+}
+
+def _is_probably_procedure_token(tok: str) -> bool:
+    """
+    Heurística para sinalizar que um token parece ser texto de procedimento e não nome de pessoa.
+    """
+    if not tok:
+        return False
+    T = str(tok).upper().strip()
+    # Sinais fortes de procedimento/painel técnico
+    if any(h in T for h in PROCEDURE_HINTS):
+        return True
+    # Muitos sinais de "frase técnica"
+    if ("," in T) or ("/" in T) or ("(" in T) or (")" in T) or ("%" in T) or ("  " in T) or ("\\-" in T):
+        return True
+    # Muito longo para nome de pessoa (ajuste conforme o seu contexto)
+    if len(T) > 50:
+        return True
+    return False
+
 # =========================
 # Normalização de colunas
 # =========================
@@ -67,8 +100,9 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
     """
-    Parser robusto para CSV 'bruto' (como relatórios exportados),
+    Parser robusto para CSV 'bruto' (relatórios exportados),
     lendo linha a linha em ordem original e extraindo campos.
+    Corrigido para não confundir 'Paciente' com 'Cirurgia'.
     """
     rows = []
     current_section = None
@@ -121,17 +155,23 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
             if h0 - 1 >= 0 and re.fullmatch(r"\d{3,}", tokens[h0 - 1]):
                 aviso = tokens[h0 - 1]
 
-            # Atendimento e Paciente (paciente = primeiro token com letras após atendimento)
+            # Atendimento
             atendimento = None
             paciente = None
+
+            # Procura atendimento (número 7-10 dígitos)
             for i, t in enumerate(tokens):
                 if re.fullmatch(r"\d{7,10}", t):
                     atendimento = t
-                    for j in range(i + 1, len(tokens)):
-                        tj = tokens[j]
-                        if tj and HAS_LETTER_RE.search(tj) and not TIME_RE.match(tj):
-                            paciente = tj
-                            break
+                    # Limita a busca do paciente ao intervalo antes do horário (h0 - 2), para não pegar 'Cirurgia'
+                    upper_bound = (h0 - 2) if h0 is not None else len(tokens) - 1
+                    if upper_bound >= i + 1:
+                        for j in range(i + 1, upper_bound + 1):
+                            tj = tokens[j]
+                            # Deve ter letras, não ser horário e não "parecer" procedimento
+                            if tj and HAS_LETTER_RE.search(tj) and not TIME_RE.match(tj) and not _is_probably_procedure_token(tj):
+                                paciente = tj
+                                break
                     break
 
             base_idx = h1 if h1 is not None else h0
@@ -279,6 +319,42 @@ def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # =========================
+# Sanitização do campo Paciente
+# =========================
+
+def _sanitize_patient_field(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Zera 'Paciente' quando:
+    - Paciente == Cirurgia
+    - Paciente contém hints de procedimento
+    - Paciente aparenta texto técnico (muito longo / vírgulas / barras / parênteses / traços)
+    """
+    if df is None or df.empty:
+        return df
+    df = df.copy()
+
+    def clean_pac(row):
+        pac = str(row.get("Paciente", "") or "").strip()
+        cir = str(row.get("Cirurgia", "") or "").strip()
+        if not pac:
+            return pac  # já está vazio
+
+        if cir and pac.upper() == cir.upper():
+            return ""  # zera
+
+        if _is_probably_procedure_token(pac):
+            return ""  # zera
+
+        return pac
+
+    if "Paciente" not in df.columns:
+        df["Paciente"] = pd.NA
+
+    df["Paciente"] = df.apply(clean_pac, axis=1).replace({"": pd.NA})
+    return df
+
+
+# =========================
 # Pipeline principal
 # =========================
 
@@ -329,6 +405,9 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
 
     # 2) Herança linha-a-linha por Data
     df = _herdar_por_data_ordem_original(df_in)
+
+    # 2.1) Sanitização do campo Paciente (evita nomes de procedimentos)
+    df = _sanitize_patient_field(df)
 
     # 3) Filtro de prestadores (case-insensitive com normalização)
     def norm(s): return (s or "").strip().upper()
