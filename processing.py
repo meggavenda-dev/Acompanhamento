@@ -4,24 +4,54 @@ import io
 import csv
 import re
 import pandas as pd
-from dateutil import parser as dtparser  # (mantido caso queira evoluir parsing de datas)
+from dateutil import parser as dtparser  # mantido se quiser evoluir parsing de datas
 
-# Padrões/regex utilizados
+# ---------------- Padrões/regex ----------------
 TIME_RE = re.compile(r"^\d{1,2}:\d{2}$")
 DATE_RE = re.compile(r"\b(\d{2}/\d{2}/\d{4})\b")
 HAS_LETTER_RE = re.compile(r"[A-Za-zÁÉÍÓÚÃÕÇáéíóúãõç]")
+
+# Identificadores para validação
+ID_RE = re.compile(r"^\d{7,10}$")   # Atendimento: 7 a 10 dígitos
+AVISO_RE = re.compile(r"^\d{3,}$")  # Aviso: 3+ dígitos
+
 SECTION_KEYWORDS = ["CENTRO CIRURGICO", "HEMODINAMICA", "CENTRO OBSTETRICO"]
 
+# Colunas esperadas quando o arquivo já vier estruturado
 EXPECTED_COLS = [
     "Centro", "Data", "Atendimento", "Paciente", "Aviso",
     "Hora_Inicio", "Hora_Fim", "Cirurgia", "Convenio", "Prestador",
     "Anestesista", "Tipo_Anestesia", "Quarto"
 ]
 
+# Colunas mínimas que o pipeline usa (vamos garantir mesmo que vazias)
 REQUIRED_COLS = [
     "Data", "Prestador", "Hora_Inicio", "Atendimento", "Paciente",
     "Aviso", "Convenio", "Quarto"
 ]
+
+# ---------------- Helpers de validação ----------------
+def _has_letters(s: str) -> bool:
+    s = (s or "").strip()
+    return bool(HAS_LETTER_RE.search(s))
+
+def _is_valid_case(row: pd.Series) -> bool:
+    """
+    Mantém apenas linhas que representam um caso real:
+    - Prestador e Data presentes
+    - E pelo menos um dos identificadores: Hora_Inicio OU Atendimento numérico OU Paciente com letras OU Aviso numérico
+    (Evita linhas-resumo/rodapé sem paciente/atendimento/aviso/horário)
+    """
+    prest = str(row.get("Prestador", "") or "").strip()
+    data  = str(row.get("Data", "") or "").strip()
+    if prest == "" or data == "":
+        return False
+
+    has_time  = bool(TIME_RE.match(str(row.get("Hora_Inicio", "") or "")))
+    has_att   = bool(ID_RE.match(str(row.get("Atendimento", "") or "").strip()))
+    has_pac   = _has_letters(str(row.get("Paciente", "") or ""))
+    has_aviso = bool(AVISO_RE.match(str(row.get("Aviso", "") or "").strip()))
+    return has_time or has_att or has_pac or has_aviso
 
 # ---------------- Normalização de colunas ----------------
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -106,6 +136,7 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
                     atendimento = t
                     if i + 1 < len(tokens):
                         pj = tokens[i + 1].strip()
+                        # Paciente só é válido se tiver letras e NÃO for um horário
                         if pj and HAS_LETTER_RE.search(pj) and not TIME_RE.match(pj):
                             paciente = pj
                         else:
@@ -119,9 +150,12 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
             tail = [t for t in tokens[base_idx + 1:] if t != ""]
             cirurgia = convenio = prestador = anestesista = tipo = quarto = None
             if len(tail) >= 5:
+                # Últimos 5 tokens: Convênio, Prestador, Anestesista, Tipo_Anestesia, Quarto
                 convenio, prestador, anestesista, tipo, quarto = tail[-5:]
+                # O restante à esquerda forma a Cirurgia
                 cirurgia = " ".join(tail[:-5]).strip() or None
             else:
+                # Fallback conservador (layout incompleto)
                 cirurgia = tokens[base_idx + 1] if base_idx + 1 < len(tokens) else None
                 convenio = tokens[base_idx + 2] if base_idx + 2 < len(tokens) else None
                 prestador = tokens[base_idx + 3] if base_idx + 3 < len(tokens) else None
@@ -273,6 +307,7 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
     elif name.endswith(".csv"):
         try:
             df_in = pd.read_csv(upload, sep=",", encoding="utf-8")
+            # Se não tem colunas suficientes, parseia como texto bruto
             if len(set(EXPECTED_COLS) & set(df_in.columns)) < 6:
                 upload.seek(0)
                 text = upload.read().decode("utf-8", errors="ignore")
@@ -293,7 +328,7 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
         if c not in df_in.columns:
             df_in[c] = pd.NA
 
-    # Flags do conteúdo original (antes de herdar/ffill)
+    # >>> Flags do conteúdo original (antes de herdar/ffill)
     df_in["_orig_att_blank"]  = df_in["Atendimento"].isna() | (df_in["Atendimento"].astype(str).str.strip() == "")
     df_in["_orig_pac_blank"]  = df_in["Paciente"].isna()    | (df_in["Paciente"].astype(str).str.strip()    == "")
     df_in["_orig_av_blank"]   = df_in["Aviso"].isna()       | (df_in["Aviso"].astype(str).str.strip()       == "")
@@ -302,15 +337,22 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
     # 2) Herança por Data (com salvaguardas por prestador)
     df = _herdar_por_data_ordem_original(df_in)
 
+    # --- SANITIZAÇÃO: Paciente nunca deve ser numérico puro ---
+    df["Paciente"] = df["Paciente"].apply(lambda x: None if str(x or "").strip().isdigit() else x)
+
+    # --- FILTRO: remover linhas-resumo/rodapé sem identificadores reais ---
+    df = df[df.apply(_is_valid_case, axis=1)].copy()
+
     # 3) Filtro de prestadores (case-insensitive com normalização)
     def normalize(s): return (s or "").strip().upper()
     target = [normalize(p) for p in prestadores_lista]
+    # Garante coluna Prestador
     if "Prestador" not in df.columns:
         df["Prestador"] = pd.NA
     df["Prestador_norm"] = df["Prestador"].astype(str).apply(normalize)
     df = df[df["Prestador_norm"].isin(target)].copy()
 
-    # 4) Ordenação por tempo e deduplicação
+    # 4) Ordenação por tempo e deduplicação por (Data, Paciente, Prestador)
     hora_inicio = df["Hora_Inicio"] if "Hora_Inicio" in df.columns else pd.Series("", index=df.index)
     data_series = df["Data"] if "Data" in df.columns else pd.Series("", index=df.index)
 
@@ -322,10 +364,11 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
     df = df.sort_values(["Data", "Paciente", "Prestador_norm", "start_key", "_row_idx"]).copy()
     df = df.drop_duplicates(subset=["Data", "Paciente", "Prestador_norm"], keep="first")
 
-    # 5) Hospital + Ano/Mes/Dia
+    # 5) Hospital informado + Ano/Mes/Dia
     hosp = (selected_hospital or "").strip() or "Hospital não informado"
     df["Hospital"] = hosp
 
+    # Garante coluna Data antes de extrair Ano/Mes/Dia
     if "Data" not in df.columns:
         df["Data"] = pd.NA
 
@@ -334,7 +377,7 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
     df["Mes"] = dt.dt.month
     df["Dia"] = dt.dt.day
 
-    # 6) Seleção final de colunas
+    # 6) Seleção das colunas finais
     final_cols = [
         "Hospital", "Ano", "Mes", "Dia",
         "Data", "Atendimento", "Paciente", "Aviso",
@@ -345,5 +388,7 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
             df[c] = pd.NA
     out = df[final_cols].copy()
 
+    # Ordenação para retorno (ano/mês/dia)
     out = out.sort_values(["Hospital", "Ano", "Mes", "Dia", "Paciente", "Prestador"]).reset_index(drop=True)
     return out
+
