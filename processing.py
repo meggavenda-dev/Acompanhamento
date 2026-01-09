@@ -3,6 +3,7 @@
 import io
 import csv
 import re
+import numpy as np
 import pandas as pd
 from dateutil import parser as dtparser  # reservado para futuras evoluções
 
@@ -431,8 +432,7 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
     df["Prestador_norm"] = df["Prestador"].apply(norm)
     df = df[df["Prestador_norm"].isin(target)].copy()
 
-    # 4) Ordenação por tempo e deduplicação
-    # Garante colunas auxiliares
+    # 4) Ordenação por tempo
     hora_inicio = df["Hora_Inicio"] if "Hora_Inicio" in df.columns else pd.Series("", index=df.index)
     data_series = df["Data"] if "Data" in df.columns else pd.Series("", index=df.index)
 
@@ -442,19 +442,30 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
         errors="coerce"
     )
 
-    # Marcação de pacientes pendentes (apenas para apoio; não retorna por padrão)
-    df["Paciente_pendente"] = df["Paciente"].isna() | df["Paciente"].astype(str).str.strip().eq("")
+    # 4.1) Deduplicação híbrida (corrige contagem 32 vs 37)
+    def _norm_blank(series: pd.Series) -> pd.Series:
+        return series.fillna("").astype(str).str.strip().str.upper()
 
-    # Deduplicação:
-    # - NÃO deduplicar linhas com Paciente em branco (mantém todas para facilitar a revisão)
-    # - Deduplicar apenas onde Paciente não está em branco, por (Data, Paciente, Prestador_norm)
-    mask_blank_pac = df["Paciente"].isna() | df["Paciente"].astype(str).str.strip().eq("")
-    df_nonblank = df[~mask_blank_pac].sort_values(["Data", "Paciente", "Prestador_norm", "start_key"])
-    df_nonblank = df_nonblank.drop_duplicates(subset=["Data", "Paciente", "Prestador_norm"], keep="first")
-    df_blank = df[mask_blank_pac]
+    P = _norm_blank(df.get("Paciente", pd.Series(index=df.index)))
+    A = _norm_blank(df.get("Atendimento", pd.Series(index=df.index)))
+    V = _norm_blank(df.get("Aviso", pd.Series(index=df.index)))
+    D = _norm_blank(df.get("Data", pd.Series(index=df.index)))
+    PR = df["Prestador_norm"].fillna("").astype(str)
 
-    df = pd.concat([df_nonblank, df_blank], ignore_index=True)
+    # Tag de deduplicação: P (preferencial), senão A, senão V, senão fallback com tempo
+    df["__dedup_tag"] = np.where(P != "",
+                                 "P|" + D + "|" + P + "|" + PR,
+                                 np.where(A != "",
+                                          "A|" + D + "|" + A + "|" + PR,
+                                          np.where(V != "",
+                                                   "V|" + D + "|" + V + "|" + PR,
+                                                   "T|" + D + "|" + PR + "|" + df["start_key"].astype(str)
+                                          )
+                                 ))
+
     df = df.sort_values(["Data", "Paciente", "Prestador_norm", "start_key"])
+    df = df.drop_duplicates(subset=["__dedup_tag"], keep="first")
+    df = df.drop(columns=["__dedup_tag"])
 
     # 5) Hospital + Ano/Mes/Dia
     hosp = selected_hospital if (selected_hospital and not pd.isna(selected_hospital)) else ""
@@ -485,4 +496,3 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
     # Ordenação para retorno
     out = out.sort_values(["Hospital", "Ano", "Mes", "Dia", "Paciente", "Prestador"]).reset_index(drop=True)
     return out
-
