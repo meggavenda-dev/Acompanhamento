@@ -274,8 +274,16 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
             # cria coluna vazia com alinhamento de índice
             df_in[c] = pd.NA
 
+    # >>> NOVO: máscara das linhas cujo Paciente VEIO vazio no arquivo original
+    paciente_blank_mask = df_in["Paciente"].isna() | (df_in["Paciente"].astype(str).str.strip() == "")
+
     # 2) Herança linha-a-linha por Data
     df = _herdar_por_data_ordem_original(df_in)
+
+    # >>> NOVO: reblank em Paciente para QUEM VEIO vazio (preserva o vazio original)
+    # reindex para alinhar índices caso o DF tenha sido reordenado
+    paciente_blank_mask = paciente_blank_mask.reindex(df.index, fill_value=False)
+    df.loc[paciente_blank_mask, "Paciente"] = pd.NA
 
     # 3) Filtros dos prestadores (case-insensitive com normalização)
     def normalize(s): return (s or "").strip().upper()
