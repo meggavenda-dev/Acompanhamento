@@ -228,4 +228,3 @@ def count_all():
     with engine.connect() as conn:
         rs = conn.execute(text("SELECT COUNT(1) FROM pacientes_unicos_por_dia_prestador"))
         return rs.scalar_one()
-
