@@ -47,10 +47,10 @@ if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
         st.warning("Não foi possível baixar o banco do GitHub. Verifique token/permissões em st.secrets.")
         st.exception(e)
 
-# Inicializa DB (cria tabela/índices se necessário) — também cria as tabelas de catálogos e cirurgias
+# Inicializa DB (cria tabela/índices se necessário)
 init_db()
 
-# Lista única de hospitais para reuso em todas as abas
+# Lista única de hospitais para reuso
 HOSPITAL_OPCOES = [
     "Hospital Santa Lucia Sul",
     "Hospital Santa Lucia Norte",
@@ -107,7 +107,6 @@ with tabs[0]:
     def _make_upload_id(file, hospital: str) -> str:
         name = getattr(file, "name", "sem_nome")
         size = getattr(file, "size", 0)
-        # hospital influencia o processamento; trocando hospital também deve resetar
         return f"{name}-{size}-{hospital.strip()}"
 
     # Botão para limpar e recomeçar (opcional)
@@ -123,7 +122,6 @@ with tabs[0]:
     if uploaded_file is not None:
         current_upload_id = _make_upload_id(uploaded_file, selected_hospital)
 
-        # Se for uma nova importação (arquivo/hospital diferente), zera o DF e editor
         if st.session_state.last_upload_id != current_upload_id:
             st.session_state.df_final = None
             st.session_state.editor_key = f"editor_pacientes_{current_upload_id}"
@@ -148,7 +146,6 @@ with tabs[0]:
         st.markdown("#### Revisar e editar nomes de Paciente (opcional)")
         st.caption("Edite apenas a coluna 'Paciente' se necessário. As demais estão bloqueadas para evitar alterações acidentais.")
 
-        # Editor com restrição: somente 'Paciente' editável
         df_to_edit = st.session_state.df_final.sort_values(
             ["Hospital", "Ano", "Mes", "Dia", "Paciente", "Prestador"]
         ).reset_index(drop=True)
@@ -156,7 +153,7 @@ with tabs[0]:
         edited_df = st.data_editor(
             df_to_edit,
             use_container_width=True,
-            num_rows="fixed",  # não permite adicionar linhas
+            num_rows="fixed",
             column_config={
                 "Hospital": st.column_config.TextColumn(disabled=True),
                 "Ano": st.column_config.NumberColumn(disabled=True),
@@ -168,28 +165,21 @@ with tabs[0]:
                 "Convenio": st.column_config.TextColumn(disabled=True),
                 "Prestador": st.column_config.TextColumn(disabled=True),
                 "Quarto": st.column_config.TextColumn(disabled=True),
-                # Paciente permanece editável
                 "Paciente": st.column_config.TextColumn(help="Clique para editar o nome do paciente."),
             },
             hide_index=True,
-            key=st.session_state.editor_key  # chave única por importação
+            key=st.session_state.editor_key
         )
-
-        # Atualiza o estado com as edições realizadas
         st.session_state.df_final = edited_df
 
         # ---------------- Gravar no Banco + commit automático no GitHub ----------------
         st.markdown("#### Persistência")
         if st.button("Salvar no banco (exemplo.db)"):
             try:
-                # 1) UPSERT local
                 upsert_dataframe(st.session_state.df_final)
-
-                # 2) Contagem para feedback
                 total = count_all()
                 st.success(f"Dados salvos com sucesso em exemplo.db. Total de linhas no banco: {total}")
 
-                # 3) Commit/push automático para GitHub
                 if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
                     try:
                         ok = upload_db_to_github(
@@ -206,7 +196,6 @@ with tabs[0]:
                         st.error("Falha ao sincronizar com GitHub (commit automático).")
                         st.exception(e)
 
-                # 4) Limpa DF e editor para nova importação
                 st.session_state.df_final = None
                 st.session_state.editor_key = "editor_pacientes_after_save"
 
@@ -235,8 +224,6 @@ with tabs[0]:
             db_df.sort_values(["Hospital", "Ano", "Mes", "Dia", "Paciente", "Prestador"]),
             use_container_width=True
         )
-
-        # Exportar direto do banco também (multi-aba por hospital)
         st.markdown("##### Exportar Excel por Hospital (dados do banco)")
         excel_bytes_db = to_formatted_excel_by_hospital(db_df)
         st.download_button(
@@ -260,15 +247,15 @@ with tabs[1]:
         list_cirurgia_situacoes,
         list_cirurgias,
         delete_cirurgia,
-        list_registros_base_all  # opcional, diagnóstico
+        list_registros_base_all  # opcional
     )
     from export import to_formatted_excel_cirurgias
 
-    # Filtros base para buscar registros pré-preenchidos da tabela original
-    st.markdown("#### Pré-preenchimento a partir de registros importados")
+    # -------- Filtros de carregamento --------
+    st.markdown("#### Filtros para carregar pacientes na Lista de Cirurgias")
     colF1, colF2, colF3 = st.columns(3)
     with colF1:
-        hosp_cad = st.selectbox("Hospital", options=HOSPITAL_OPCOES, index=0)
+        hosp_cad = st.selectbox("Filtro Hospital (lista)", options=HOSPITAL_OPCOES, index=0)
     now = datetime.now()
     with colF2:
         ano_cad = st.number_input("Ano (filtro base)", min_value=2000, max_value=2100, value=now.year, step=1)
@@ -282,141 +269,103 @@ with tabs[1]:
     )
     prestadores_lista_filtro = [p.strip() for p in prestadores_filtro.split(";") if p.strip()]
 
-    # Diagnóstico opcional: ver alguns registros base sem filtros
-    with st.expander("🔎 Diagnóstico rápido (ver primeiros registros da base)", expanded=False):
-        if st.button("Ver todos (limite 500)"):
-            try:
-                rows_all = list_registros_base_all(500)
-                df_all = pd.DataFrame(rows_all, columns=["Hospital", "Data", "Atendimento", "Paciente", "Convenio", "Prestador"])
-                st.dataframe(df_all, use_container_width=True, height=300)
-            except Exception as e:
-                st.error("Erro ao listar registros base.")
-                st.exception(e)
+    # -------- Carregar catálogos (para dropdowns do grid) --------
+    tipos = list_procedimento_tipos(only_active=True)
+    sits = list_cirurgia_situacoes(only_active=True)
+    # Mapas: nome -> id e id -> nome
+    tipo_nome2id = {t[1]: t[0] for t in tipos}
+    tipo_id2nome = {t[0]: t[1] for t in tipos}
+    sit_nome2id  = {s[1]: s[0] for s in sits}
+    sit_id2nome  = {s[0]: s[1] for s in sits}
 
-    st.caption("Use o filtro acima para selecionar um registro existente e pré-preencher a cirurgia.")
+    # -------- Montar a Lista de Cirurgias com união (Cirurgias + Base) --------
     try:
-        base_rows = find_registros_para_prefill(
-            hosp_cad,
-            ano=int(ano_cad) if ano_cad else None,
-            mes=int(mes_cad) if mes_cad else None,
-            prestadores=prestadores_lista_filtro  # vazio = não filtra por prestador
-        )
-        if base_rows:
-            df_base = pd.DataFrame(base_rows, columns=["Hospital", "Data", "Atendimento", "Paciente", "Convenio", "Prestador"])
-            st.dataframe(df_base, use_container_width=True, height=240)
-            idx = st.number_input("Linha do registro base (índice)", min_value=0, max_value=len(df_base)-1, value=0, step=1)
-            base = df_base.iloc[int(idx)]
-        else:
-            st.info("Nenhum registro encontrado para pré-preenchimento. Ajuste os filtros ou limpe o campo de prestadores.")
-            base = None
-    except Exception as e:
-        st.error("Erro ao carregar registros base.")
-        st.exception(e)
-        base = None
-
-    # --- Formulário de Cirurgia ---
-    st.divider()
-    st.markdown("#### Formulário de Cirurgia")
-    with st.form("form_cirurgia"):
-        # Pré-preenche se houver base
-        hospital = st.text_input("Hospital", value=(base["Hospital"] if base is not None else hosp_cad))
-        atendimento = st.text_input("Número do atendimento", value=(base["Atendimento"] if base is not None else ""))
-        paciente = st.text_input("Paciente", value=(base["Paciente"] if base is not None else ""))
-        prestador = st.text_input("Prestador", value=(base["Prestador"] if base is not None else ""))
-        data_cirurgia = st.text_input("Data da cirurgia (ex.: 11/01/2026)", value=(base["Data"] if base is not None else ""))  # livre (mantém dd/MM/yyyy)
-        convenio = st.text_input("Convênio", value=(base["Convenio"] if base is not None else ""))
-
-        # Catálogos
-        tipos = list_procedimento_tipos(only_active=True)
-        sits = list_cirurgia_situacoes(only_active=True)
-        tipo_options = {t[1]: t[0] for t in tipos}  # nome -> id
-        sit_options = {s[1]: s[0] for s in sits}    # nome -> id
-
-        tipo_nome_sel = st.selectbox("Tipo de procedimento", options=["(selecione)"] + list(tipo_options.keys()))
-        sit_nome_sel = st.selectbox("Situação da cirurgia", options=["(selecione)"] + list(sit_options.keys()))
-
-        guia = st.text_input("Guia AMHPTISS (manual)", value="")
-        guia_comp = st.text_area("Guia AMHPTISS - complemento (manual)", value="")
-        fatura = st.text_input("Fatura (manual)", value="")
-        obs = st.text_area("Observações (opcional)", value="")
-
-        submitted = st.form_submit_button("Salvar cirurgia")
-        if submitted:
-            try:
-                payload = {
-                    "Hospital": hospital.strip(),
-                    "Atendimento": atendimento.strip(),
-                    "Paciente": paciente.strip(),
-                    "Prestador": prestador.strip(),
-                    "Data_Cirurgia": data_cirurgia.strip(),
-                    "Convenio": convenio.strip(),
-                    "Procedimento_Tipo_ID": tipo_options.get(tipo_nome_sel) if tipo_nome_sel != "(selecione)" else None,
-                    "Situacao_ID": sit_options.get(sit_nome_sel) if sit_nome_sel != "(selecione)" else None,
-                    "Guia_AMHPTISS": guia.strip(),
-                    "Guia_AMHPTISS_Complemento": guia_comp.strip(),
-                    "Fatura": fatura.strip(),
-                    "Observacoes": obs.strip(),
-                }
-                cid = insert_or_update_cirurgia(payload)
-                st.success(f"Cirurgia salva com sucesso (id={cid}).")
-
-                # Commit/push automático para GitHub
-                if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
-                    try:
-                        ok = upload_db_to_github(
-                            owner=GH_OWNER,
-                            repo=GH_REPO,
-                            path_in_repo=GH_PATH_IN_REPO,
-                            branch=GH_BRANCH,
-                            local_db_path=DB_PATH,
-                            commit_message="Atualiza banco SQLite via app (salvar/editar cirurgia)"
-                        )
-                        if ok:
-                            st.success("Sincronização automática com GitHub concluída.")
-                    except Exception as e:
-                        st.error("Falha ao sincronizar com GitHub (commit automático).")
-                        st.exception(e)
-
-            except Exception as e:
-                st.error("Falha ao salvar cirurgia.")
-                st.exception(e)
-
-    # --- Lista / Filtros / Export ---
-    st.divider()
-    st.markdown("#### Lista de Cirurgias")
-    colL1, colL2, colL3, colL4 = st.columns([2, 2, 2, 2])
-    with colL1:
-        hosp_f = st.selectbox("Filtro Hospital (lista)", options=["(todos)"] + HOSPITAL_OPCOES, index=0)
-    with colL2:
-        prest_f = st.text_input("Filtro Prestador (exato)", value="")
-    with colL3:
-        filtro_ano_mes = st.text_input("Filtro Data Cirurgia (contém, ex.: 01/2026 ou 2026-01)", value="")
-    with colL4:
-        btn_recarregar = st.button("Recarregar lista")
-
-    try:
-        hosp_arg = None if hosp_f == "(todos)" else hosp_f
-        rows_cir = list_cirurgias(hospital=hosp_arg, ano_mes=(filtro_ano_mes or None), prestador=(prest_f or None))
+        # 1) Linhas já existentes na tabela cirurgias
+        rows_cir = list_cirurgias(hospital=hosp_cad, ano_mes=None, prestador=None)
         df_cir = pd.DataFrame(rows_cir, columns=[
             "id", "Hospital", "Atendimento", "Paciente", "Prestador", "Data_Cirurgia",
             "Convenio", "Procedimento_Tipo_ID", "Situacao_ID",
             "Guia_AMHPTISS", "Guia_AMHPTISS_Complemento", "Fatura",
             "Observacoes", "created_at", "updated_at"
         ])
-        st.data_editor(
-            df_cir,
+        if df_cir.empty:
+            df_cir = pd.DataFrame(columns=[
+                "id", "Hospital", "Atendimento", "Paciente", "Prestador", "Data_Cirurgia",
+                "Convenio", "Procedimento_Tipo_ID", "Situacao_ID",
+                "Guia_AMHPTISS", "Guia_AMHPTISS_Complemento", "Fatura",
+                "Observacoes", "created_at", "updated_at"
+            ])
+
+        df_cir["Fonte"] = "Cirurgia"
+        # Adiciona colunas de nome para UX melhor no grid
+        df_cir["Tipo (nome)"] = df_cir["Procedimento_Tipo_ID"].map(tipo_id2nome).fillna("")
+        df_cir["Situação (nome)"] = df_cir["Situacao_ID"].map(sit_id2nome).fillna("")
+
+        # 2) Registros base da tabela de pacientes para o período/hospital
+        base_rows = find_registros_para_prefill(
+            hosp_cad,
+            ano=int(ano_cad) if ano_cad else None,
+            mes=int(mes_cad) if mes_cad else None,
+            prestadores=prestadores_lista_filtro  # vazio -> não filtra
+        )
+        df_base = pd.DataFrame(base_rows, columns=["Hospital", "Data", "Atendimento", "Paciente", "Convenio", "Prestador"])
+        if df_base.empty:
+            df_base = pd.DataFrame(columns=["Hospital", "Data", "Atendimento", "Paciente", "Convenio", "Prestador"])
+
+        # Mapeia para o esquema da tabela cirurgias (campos manuais vazios)
+        df_base_mapped = pd.DataFrame({
+            "id": [None]*len(df_base),
+            "Hospital": df_base["Hospital"].astype(str),
+            "Atendimento": df_base["Atendimento"].astype(str),
+            "Paciente": df_base["Paciente"].astype(str),
+            "Prestador": df_base["Prestador"].astype(str),
+            "Data_Cirurgia": df_base["Data"].astype(str),  # usa Data como Data_Cirurgia
+            "Convenio": df_base["Convenio"].astype(str),
+            "Procedimento_Tipo_ID": [None]*len(df_base),
+            "Situacao_ID": [None]*len(df_base),
+            "Guia_AMHPTISS": ["" for _ in range(len(df_base))],
+            "Guia_AMHPTISS_Complemento": ["" for _ in range(len(df_base))],
+            "Fatura": ["" for _ in range(len(df_base))],
+            "Observacoes": ["" for _ in range(len(df_base))],
+            "created_at": [None]*len(df_base),
+            "updated_at": [None]*len(df_base),
+            "Fonte": ["Base"]*len(df_base),
+            "Tipo (nome)": ["" for _ in range(len(df_base))],
+            "Situação (nome)": ["" for _ in range(len(df_base))]
+        })
+
+        # 3) União preferindo cirurgias já existentes (para evitar duplicar a mesma chave)
+        KEY_COLS = ["Hospital", "Atendimento", "Prestador", "Data_Cirurgia"]
+        # Primeiro concatena; depois ordena para manter a versão com id (cirurgia) na frente
+        df_union = pd.concat([df_cir, df_base_mapped], ignore_index=True)
+        df_union["_has_id"] = df_union["id"].notna().astype(int)
+        df_union = df_union.sort_values(KEY_COLS + ["_has_id"], ascending=[True, True, True, True, False])
+
+        # Remove duplicados pela chave, mantendo a que possui id quando existir
+        df_union = df_union.drop_duplicates(subset=KEY_COLS, keep="first")
+        df_union.drop(columns=["_has_id"], inplace=True)
+
+        st.markdown("#### Lista de Cirurgias (com pacientes carregados da base)")
+        st.caption("Edite diretamente no grid. Linhas com Fonte=Base são novos candidatos a cirurgia; ao salvar, viram registros na tabela de cirurgias.")
+        # Editor com dropdowns para Tipo/Situação pelos nomes
+        edited_df = st.data_editor(
+            df_union,
             use_container_width=True,
             num_rows="fixed",
             column_config={
                 "id": st.column_config.NumberColumn(disabled=True),
+                "Fonte": st.column_config.TextColumn(disabled=True),
                 "Hospital": st.column_config.TextColumn(),
                 "Atendimento": st.column_config.TextColumn(),
                 "Paciente": st.column_config.TextColumn(),
                 "Prestador": st.column_config.TextColumn(),
-                "Data_Cirurgia": st.column_config.TextColumn(help="Formato livre (ex.: dd/MM/yyyy)."),
+                "Data_Cirurgia": st.column_config.TextColumn(help="Formato livre, ex.: dd/MM/yyyy ou YYYY-MM-DD."),
                 "Convenio": st.column_config.TextColumn(),
-                "Procedimento_Tipo_ID": st.column_config.NumberColumn(help="ID do tipo escolhido."),
-                "Situacao_ID": st.column_config.NumberColumn(help="ID da situação escolhida."),
+                # Exibe nomes (Select) em vez de ID
+                "Tipo (nome)": st.column_config.SelectboxColumn(options=[""] + list(tipo_nome2id.keys()), help="Selecione o tipo de procedimento."),
+                "Situação (nome)": st.column_config.SelectboxColumn(options=[""] + list(sit_nome2id.keys()), help="Selecione a situação da cirurgia."),
+                "Procedimento_Tipo_ID": st.column_config.NumberColumn(disabled=True, help="Preenchido ao salvar pela seleção de 'Tipo (nome)'."),
+                "Situacao_ID": st.column_config.NumberColumn(disabled=True, help="Preenchido ao salvar pela seleção de 'Situação (nome)'."),
                 "Guia_AMHPTISS": st.column_config.TextColumn(),
                 "Guia_AMHPTISS_Complemento": st.column_config.TextColumn(),
                 "Fatura": st.column_config.TextColumn(),
@@ -424,27 +373,86 @@ with tabs[1]:
                 "created_at": st.column_config.TextColumn(disabled=True),
                 "updated_at": st.column_config.TextColumn(disabled=True),
             },
-            key="editor_lista_cirurgias"
+            key="editor_lista_cirurgias_union"
         )
 
-        colE1, colE2, colE3 = st.columns([1, 1, 2])
-        with colE1:
+        # --- Ações abaixo do grid ---
+        colG1, colG2, colG3 = st.columns([1.2, 1, 1.8])
+        with colG1:
+            # Salvar em massa todas as linhas editadas
+            if st.button("💾 Salvar alterações da Lista (UPSERT em massa)"):
+                try:
+                    # Converte nomes de catálogo em IDs antes de salvar
+                    edited_df = edited_df.copy()
+                    edited_df["Procedimento_Tipo_ID"] = edited_df["Tipo (nome)"].map(lambda n: tipo_nome2id.get(n) if n else None)
+                    edited_df["Situacao_ID"] = edited_df["Situação (nome)"].map(lambda n: sit_nome2id.get(n) if n else None)
+
+                    # UPSERT por cada linha com chave válida
+                    num_ok, num_skip = 0, 0
+                    for _, r in edited_df.iterrows():
+                        h = str(r.get("Hospital", "")).strip()
+                        att = str(r.get("Atendimento", "")).strip()
+                        p = str(r.get("Prestador", "")).strip()
+                        d = str(r.get("Data_Cirurgia", "")).strip()
+                        if h and att and p and d:
+                            payload = {
+                                "Hospital": h,
+                                "Atendimento": att,
+                                "Paciente": str(r.get("Paciente", "")).strip(),
+                                "Prestador": p,
+                                "Data_Cirurgia": d,
+                                "Convenio": str(r.get("Convenio", "")).strip(),
+                                "Procedimento_Tipo_ID": r.get("Procedimento_Tipo_ID"),
+                                "Situacao_ID": r.get("Situacao_ID"),
+                                "Guia_AMHPTISS": str(r.get("Guia_AMHPTISS", "")).strip(),
+                                "Guia_AMHPTISS_Complemento": str(r.get("Guia_AMHPTISS_Complemento", "")).strip(),
+                                "Fatura": str(r.get("Fatura", "")).strip(),
+                                "Observacoes": str(r.get("Observacoes", "")).strip(),
+                            }
+                            insert_or_update_cirurgia(payload)
+                            num_ok += 1
+                        else:
+                            num_skip += 1
+                    st.success(f"UPSERT concluído. {num_ok} linha(s) salvas; {num_skip} ignorada(s) (chave incompleta).")
+
+                    # Sincroniza GitHub após salvar
+                    if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
+                        try:
+                            ok = upload_db_to_github(
+                                owner=GH_OWNER,
+                                repo=GH_REPO,
+                                path_in_repo=GH_PATH_IN_REPO,
+                                branch=GH_BRANCH,
+                                local_db_path=DB_PATH,
+                                commit_message="Atualiza banco SQLite via app (salvar em massa lista de cirurgias)"
+                            )
+                            if ok:
+                                st.success("Sincronização automática com GitHub concluída.")
+                        except Exception as e:
+                            st.error("Falha ao sincronizar com GitHub (commit automático).")
+                            st.exception(e)
+
+                except Exception as e:
+                    st.error("Falha ao salvar alterações da lista.")
+                    st.exception(e)
+
+        with colG2:
             from export import to_formatted_excel_cirurgias
-            if st.button("Exportar Excel (Cirurgias)"):
-                excel_bytes = to_formatted_excel_cirurgias(df_cir)
+            if st.button("⬇️ Exportar Excel (Lista atual)"):
+                excel_bytes = to_formatted_excel_cirurgias(edited_df.drop(columns=["Tipo (nome)", "Situação (nome)"], errors="ignore"))
                 st.download_button(
                     label="Baixar Cirurgias.xlsx",
                     data=excel_bytes,
                     file_name="Cirurgias.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-        with colE2:
-            del_id = st.number_input("Excluir por id", min_value=0, step=1, value=0)
-            if st.button("Excluir cirurgia"):
+
+        with colG3:
+            del_id = st.number_input("Excluir cirurgia por id", min_value=0, step=1, value=0)
+            if st.button("🗑️ Excluir cirurgia"):
                 try:
                     delete_cirurgia(int(del_id))
                     st.success(f"Cirurgia id={int(del_id)} excluída.")
-                    # Sincroniza GitHub após exclusão
                     if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
                         try:
                             ok = upload_db_to_github(
@@ -463,10 +471,20 @@ with tabs[1]:
                 except Exception as e:
                     st.error("Falha ao excluir.")
                     st.exception(e)
-        with colE3:
-            st.caption("Obs.: para editar linhas, altere no grid e clique novamente em 'Salvar cirurgia' com os mesmos campos-chave (Hospital, Atendimento, Prestador, Data_Cirurgia) para aplicar o UPSERT. Uma atualização em massa pode ser implementada se quiser.")
+
+        # Diagnóstico opcional
+        with st.expander("🔎 Diagnóstico rápido (ver primeiros registros da base)", expanded=False):
+            if st.button("Ver todos (limite 500)"):
+                try:
+                    rows_all = list_registros_base_all(500)
+                    df_all = pd.DataFrame(rows_all, columns=["Hospital", "Data", "Atendimento", "Paciente", "Convenio", "Prestador"])
+                    st.dataframe(df_all, use_container_width=True, height=300)
+                except Exception as e:
+                    st.error("Erro ao listar registros base.")
+                    st.exception(e)
+
     except Exception as e:
-        st.error("Erro ao listar/operar cirurgias.")
+        st.error("Erro ao montar a lista de cirurgias.")
         st.exception(e)
 
 # ====================================================================================
@@ -562,4 +580,3 @@ with tabs[2]:
         except Exception as e:
             st.error("Erro ao listar/editar situações.")
             st.exception(e)
-
