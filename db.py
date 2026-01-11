@@ -546,6 +546,7 @@ def sync_autorizacoes_from_pacientes(default_status: str = "EM ANDAMENTO") -> Tu
             }
             nk = _mk_aut_key_from_patient(patient)
 
+            # UPDATE (espelho)
             upd = conn.execute(text("""
                 UPDATE autorizacoes_pendencias
                    SET Unidade = :Unidade,
@@ -568,9 +569,25 @@ def sync_autorizacoes_from_pacientes(default_status: str = "EM ANDAMENTO") -> Tu
             })
             atualizados += upd.rowcount
 
+            # INSERT (se não existir)
             ins = conn.execute(text("""
                 INSERT OR IGNORE INTO autorizacoes_pendencias
                 (Unidade, Atendimento, Paciente, Profissional, Data_Cirurgia, Convenio,
                  Tipo_Procedimento, Observacoes, Guia_AMHPTISS, Guia_AMHPTISS_Complemento, Fatura,
                  Status, NaturalKey, UltimaAtualizacao)
                 VALUES (:Unidade, :Atendimento, :Paciente, :Profissional, :Data_Cirurgia, :Convenio,
+                        '', '', '', '', '', :Status, :NaturalKey, :UltimaAtualizacao)
+            """), {
+                "Unidade": patient["Hospital"],
+                "Atendimento": patient["Atendimento"],
+                "Paciente": patient["Paciente"],
+                "Profissional": patient["Prestador"],
+                "Data_Cirurgia": patient["Data"],
+                "Convenio": patient["Convenio"],
+                "Status": default_status,
+                "NaturalKey": nk,
+                "UltimaAtualizacao": now_iso
+            })
+            novos += ins.rowcount
+
+    return novos, atualizados
