@@ -143,6 +143,10 @@ def _safe_str(val, default: str = "") -> str:
 # ---------------- CRUD - Pacientes ----------------
 
 def upsert_dataframe(df: pd.DataFrame):
+    """
+    UPSERT de pacientes_unicos_por_dia_prestador.
+    Bloqueia 'Paciente' vazio.
+    """
     if df is None or len(df) == 0:
         return
 
@@ -177,6 +181,9 @@ def upsert_dataframe(df: pd.DataFrame):
 
 
 def read_all():
+    """
+    Lê todos os registros de pacientes, ordenando por Hospital, Ano, Mes, Dia, Paciente, Prestador.
+    """
     engine = get_engine()
     with engine.connect() as conn:
         rs = conn.execute(text("""
@@ -185,6 +192,16 @@ def read_all():
             ORDER BY Hospital, Ano, Mes, Dia, Paciente, Prestador
         """))
         return rs.fetchall()
+
+
+def count_all() -> int:
+    """
+    Retorna a quantidade de linhas na tabela pacientes_unicos_por_dia_prestador.
+    """
+    engine = get_engine()
+    with engine.connect() as conn:
+        rs = conn.execute(text("SELECT COUNT(1) FROM pacientes_unicos_por_dia_prestador"))
+        return rs.scalar_one()
 
 
 # ---------------- Helpers - Chaves de Autorização ----------------
@@ -207,6 +224,9 @@ def _mk_aut_key_from_patient(patient_row: Dict) -> str:
 # ---------------- CRUD - Autorizações (pai) ----------------
 
 def upsert_autorizacoes(df: pd.DataFrame):
+    """
+    UPSERT na tabela de autorizações baseado em NaturalKey.
+    """
     if df is None or len(df) == 0:
         return
     now_iso = pd.Timestamp.utcnow().isoformat(timespec="seconds")
@@ -291,7 +311,10 @@ def read_autorizacoes(include_nk: bool = True):
             return rs.fetchall()
 
 
-def count_autorizacoes():
+def count_autorizacoes() -> int:
+    """
+    Conta registros na tabela de autorizações.
+    """
     engine = get_engine()
     with engine.connect() as conn:
         return conn.execute(text("SELECT COUNT(1) FROM autorizacoes_pendencias")).scalar_one()
@@ -338,6 +361,9 @@ def get_aut_by_nk(nk: str) -> Optional[Dict]:
 # ---------------- Equipes (filha) ----------------
 
 def read_equipes(nk: str) -> List[Dict]:
+    """
+    Retorna as linhas de equipe para uma autorização (por NK).
+    """
     engine = get_engine()
     with engine.connect() as conn:
         rs = conn.execute(text("""
@@ -349,6 +375,7 @@ def read_equipes(nk: str) -> List[Dict]:
         rows = rs.fetchall()
     cols = ["NaturalKey", "Prestador", "Papel", "Participacao", "Observacao"]
     return [dict(zip(cols, r)) for r in rows]
+
 
 def upsert_equipes(nk: str, df: pd.DataFrame):
     """
@@ -363,8 +390,9 @@ def upsert_equipes(nk: str, df: pd.DataFrame):
             papel = _safe_str(row.get("Papel", ""))
             part  = _safe_str(row.get("Participacao", ""))
             obs   = _safe_str(row.get("Observacao", ""))
+            # ignora linha totalmente vazia
             if prest == "" and papel == "" and part == "" and obs == "":
-                continue  # ignora linha vazia
+                continue
             conn.execute(text("""
                 INSERT INTO autorizacoes_equipes (NaturalKey, Prestador, Papel, Participacao, Observacao)
                 VALUES (:nk, :prest, :papel, :part, :obs)
@@ -373,10 +401,15 @@ def upsert_equipes(nk: str, df: pd.DataFrame):
                     Observacao   = excluded.Observacao
             """), {"nk": nk, "prest": prest, "papel": papel, "part": part, "obs": obs})
 
+
 def delete_equipes(nk: str):
+    """
+    Apaga todas as linhas de equipe de uma autorização.
+    """
     engine = get_engine()
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM autorizacoes_equipes WHERE NaturalKey = :nk"), {"nk": nk})
+
 
 def distinct_prestadores_for_auth(nk: str) -> List[str]:
     """
@@ -404,6 +437,7 @@ def distinct_prestadores_for_auth(nk: str) -> List[str]:
             """), {"pac": auth["Paciente"], "data": auth["Data_Cirurgia"], "hosp": auth["Unidade"]})
         return [r[0] for r in rs.fetchall()]
 
+
 def sync_equipes_from_pacientes() -> Tuple[int, int]:
     """
     Cria linhas de equipe a partir dos prestadores encontrados no módulo Pacientes para cada autorização.
@@ -417,15 +451,37 @@ def sync_equipes_from_pacientes() -> Tuple[int, int]:
         rs = conn.execute(text("SELECT NaturalKey FROM autorizacoes_pendencias"))
         nks = [r[0] for r in rs.fetchall()]
         for nk in nks:
-            candidatos = distinct_prestadores_for_auth(nk)
+            auth = get_aut_by_nk(nk)
+            if auth is None:
+                continue
+            # Prestadores candidatos
+            att = _safe_str(auth.get("Atendimento", ""))
+            if att:
+                rs_cand = conn.execute(text("""
+                    SELECT DISTINCT Prestador
+                      FROM pacientes_unicos_por_dia_prestador
+                     WHERE Atendimento = :att AND (Prestador IS NOT NULL AND TRIM(Prestador) <> '')
+                """), {"att": att})
+            else:
+                rs_cand = conn.execute(text("""
+                    SELECT DISTINCT Prestador
+                      FROM pacientes_unicos_por_dia_prestador
+                     WHERE Paciente = :pac AND Data = :data AND Hospital = :hosp
+                       AND (Prestador IS NOT NULL AND TRIM(Prestador) <> '')
+                """), {"pac": auth["Paciente"], "data": auth["Data_Cirurgia"], "hosp": auth["Unidade"]})
+
+            candidatos = [r[0] for r in rs_cand.fetchall()]
             if not candidatos:
                 continue
+
             afetadas += 1
+
             # Prestadores já cadastrados
             rs2 = conn.execute(text("""
                 SELECT DISTINCT Prestador FROM autorizacoes_equipes WHERE NaturalKey = :nk
             """), {"nk": nk})
             ja = {r[0] for r in rs2.fetchall()}
+
             for p in candidatos:
                 if p not in ja:
                     ins = conn.execute(text("""
@@ -443,6 +499,7 @@ def sync_autorizacoes_from_pacientes(default_status: str = "EM ANDAMENTO") -> Tu
     Espelha/atualiza a tabela de autorizações com base na tabela de pacientes.
     Chave natural: ATT:<Atendimento> ou FALLBACK:<Paciente|Data|Hospital> (sem Prestador).
     - Atualiza campos espelho se já existir; insere novos com status default.
+    Retorna (novos_insertados, atualizados_campos_espelho).
     """
     engine = get_engine()
     now_iso = pd.Timestamp.utcnow().isoformat(timespec="seconds")
@@ -472,7 +529,7 @@ def sync_autorizacoes_from_pacientes(default_status: str = "EM ANDAMENTO") -> Tu
                    SET Unidade = :Unidade,
                        Atendimento = :Atendimento,
                        Paciente = :Paciente,
-                       Profissional = :Profissional,   -- mantém o último prestador visto como 'principal' inicial
+                       Profissional = :Profissional,   -- define 'principal' inicial como último prestador visto
                        Data_Cirurgia = :Data_Cirurgia,
                        Convenio = :Convenio,
                        UltimaAtualizacao = :UltimaAtualizacao
