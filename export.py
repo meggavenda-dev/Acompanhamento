@@ -32,6 +32,8 @@ def _write_sheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame):
     """
     Escreve o DataFrame com cabeçalho formatado, autofiltro e ajuste de larguras.
     """
+    df = df.copy()
+
     df.to_excel(writer, sheet_name=sheet_name, index=False)
     wb = writer.book
     ws = writer.sheets[sheet_name]
@@ -109,5 +111,29 @@ def to_formatted_excel_by_hospital(df: pd.DataFrame) -> io.BytesIO:
                 sheet_name = _sanitize_sheet_name(hosp, fallback="Sem_Hospital")
                 _write_sheet(writer, sheet_name, dfh)
 
+    output.seek(0)
+    return output
+
+
+def to_formatted_excel_by_status(df: pd.DataFrame) -> io.BytesIO:
+    """
+    Gera um Excel com uma aba por Status (tabela de Autorizações).
+    - Normaliza status vazio para 'Sem_Status'
+    - Ordena abas alfabeticamente por Status
+    - Em cada aba, ordena por: Convenio, Paciente (quando existirem)
+    """
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        if "Status" not in df.columns:
+            _write_sheet(writer, "Dados", df)
+        else:
+            df_aux = df.copy()
+            df_aux["Status"] = df_aux["Status"].fillna("Sem_Status").astype(str).str.strip().replace("", "Sem_Status")
+            for st_name in sorted(df_aux["Status"].unique()):
+                dfs = df_aux[df_aux["Status"] == st_name].copy()
+                order_cols = [c for c in ["Convenio", "Paciente"] if c in dfs.columns]
+                if order_cols:
+                    dfs = dfs.sort_values(order_cols, kind="mergesort")
+                _write_sheet(writer, _sanitize_sheet_name(st_name, fallback="Sem_Status"), dfs)
     output.seek(0)
     return output
