@@ -507,21 +507,57 @@ def find_registros_para_prefill(
 ):
     """
     Retorna registros da tabela original para servir de base na criação de cirurgias.
-    Filtros: hospital, (opcionais) ano, mes, prestadores exatos (case-sensitive).
+
+    Filtros:
+      - hospital (case-insensitive)
+      - ano/mes (opcionais, inteiros)
+      - prestadores (opcional; comparação case-insensitive e sem acentos)
+
+    Observações:
+      - Se 'prestadores' vier vazio/None, não aplica filtro por prestador.
+      - A normalização remove acentos e compara em UPPER, robusto a variações
+        como 'CASSIO CESAR' vs 'Cássio César'.
     """
     engine = get_engine()
-    where = ["Hospital = :h"]
-    params = {"h": hospital}
+
+    # Normalização auxiliar: remove acentos e aplica UPPER+trim
+    def _norm_upper_no_accents(s: Optional[str]) -> str:
+        import unicodedata
+        if s is None:
+            return ""
+        s = str(s).strip()
+        s = "".join(ch for ch in unicodedata.normalize("NFKD", s) if not unicodedata.combining(ch))
+        return s.upper().strip()
+
+    where = []
+    params = {}
+
+    # Hospital em case-insensitive
+    where.append("UPPER(Hospital) = UPPER(:h)")
+    params["h"] = hospital.strip()
+
     if ano is not None:
-        where.append("Ano = :a"); params["a"] = int(ano)
+        where.append("Ano = :a")
+        params["a"] = int(ano)
+
     if mes is not None:
-        where.append("Mes = :m"); params["m"] = int(mes)
-    if prestadores and len(prestadores) > 0:
-        # Monta IN dinâmico
-        in_list = ", ".join([f":p{i}" for i in range(len(prestadores))])
-        where.append(f"Prestador IN ({in_list})")
-        for i, p in enumerate(prestadores):
-            params[f"p{i}"] = p
+        where.append("Mes = :m")
+        params["m"] = int(mes)
+
+    # Prestadores: opcional — se vier vazio, não filtra
+    prestadores = [p for p in (prestadores or []) if p and str(p).strip()]
+    if prestadores:
+        # Normaliza cada prestador (sem acentos, UPPER)
+        prest_norm = [_norm_upper_no_accents(p) for p in prestadores]
+
+        # Como SQLite não tem função para remover acentos nativamente,
+        # comparamos por UPPER(Prestador) exato após normalização do lado dos parâmetros.
+        ors = []
+        for i, p in enumerate(prest_norm):
+            key = f"pn{i}"
+            ors.append(f"UPPER(Prestador) = :{key}")
+            params[key] = p
+        where.append("(" + " OR ".join(ors) + ")")
 
     sql = f"""
         SELECT Hospital, Data, Atendimento, Paciente, Convenio, Prestador
@@ -529,6 +565,24 @@ def find_registros_para_prefill(
         WHERE {' AND '.join(where)}
         ORDER BY Ano, Mes, Dia, Paciente, Prestador
     """
+
     with engine.connect() as conn:
         rs = conn.execute(text(sql), params)
+        return rs.fetchall()
+
+
+# ---------- (Opcional) Diagnóstico rápido: listar base sem filtros ----------
+def list_registros_base_all(limit: int = 500):
+    """
+    Lista até 'limit' registros da tabela base (pacientes_unicos_por_dia_prestador)
+    para diagnóstico rápido na aba de Cirurgias.
+    """
+    engine = get_engine()
+    with engine.connect() as conn:
+        rs = conn.execute(text(f"""
+            SELECT Hospital, Data, Atendimento, Paciente, Convenio, Prestador
+            FROM pacientes_unicos_por_dia_prestador
+            ORDER BY Hospital, Ano, Mes, Dia, Paciente, Prestador
+            LIMIT {int(limit)}
+        """))
         return rs.fetchall()
