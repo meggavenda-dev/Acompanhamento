@@ -62,7 +62,7 @@ from processing import process_uploaded_file
 from export import (
     to_formatted_excel_by_hospital,
     to_formatted_excel_by_status,
-    to_formatted_excel_authorizations_with_team  # export completo Autorizações + Equipes
+    to_formatted_excel_authorizations_with_team
 )
 
 # --- GitHub sync (baixar/subir o .db) ---
@@ -107,6 +107,19 @@ if "aut_sync_done" not in st.session_state:
 if "aut_sync_done_in_tab" not in st.session_state:
     st.session_state.aut_sync_done_in_tab = False
 
+# --- helper para garantir que o arquivo/pasta são graváveis
+def _ensure_writable(path: str):
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    except Exception:
+        pass
+    try:
+        with open(path, "ab"):
+            pass
+        os.chmod(path, 0o666)
+    except Exception as _e:
+        st.warning(f"Não foi possível garantir escrita em: {path}. Detalhes: {type(_e).__name__}")
+
 # 1) Baixa o DB do GitHub (se existir) antes de inicializar tabelas
 if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
     try:
@@ -126,6 +139,9 @@ if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
     except Exception as e:
         st.warning("Não foi possível baixar o banco do GitHub. Verifique token/permissões em st.secrets.")
         st.exception(e)
+
+# Garante permissão de escrita no DB (após download)
+_ensure_writable(DB_PATH)
 
 # Inicializa DB (cria tabela/índices se necessário)
 init_db()
@@ -632,4 +648,3 @@ with tab_autorizacoes:
         )
     else:
         st.info("Sincronize com os pacientes do banco para iniciar o acompanhamento.")
-
