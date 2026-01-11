@@ -50,6 +50,13 @@ if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
 # Inicializa DB (cria tabela/índices se necessário) — também cria as tabelas de catálogos e cirurgias
 init_db()
 
+# Lista única de hospitais para reuso em todas as abas
+HOSPITAL_OPCOES = [
+    "Hospital Santa Lucia Sul",
+    "Hospital Santa Lucia Norte",
+    "Hospital Maria Auxiliadora",
+]
+
 # ---------------- Abas principais ----------------
 tabs = st.tabs(["📥 Importação & Pacientes", "🩺 Cirurgias", "📚 Cadastro (Tipos & Situações)"])
 
@@ -73,14 +80,9 @@ with tabs[0]:
 
     # ---------------- Hospital do arquivo (lista fixa) ----------------
     st.markdown("#### Hospital deste arquivo")
-    hospital_opcoes = [
-        "Hospital Santa Lucia Sul",
-        "Hospital Santa Lucia Norte",
-        "Hospital Maria Auxiliadora",
-    ]
     selected_hospital = st.selectbox(
         "Selecione o Hospital referente à planilha enviada",
-        options=hospital_opcoes,
+        options=HOSPITAL_OPCOES,
         index=0,
         help="O hospital selecionado será aplicado a todas as linhas processadas deste arquivo."
     )
@@ -257,7 +259,8 @@ with tabs[1]:
         list_procedimento_tipos,
         list_cirurgia_situacoes,
         list_cirurgias,
-        delete_cirurgia
+        delete_cirurgia,
+        list_registros_base_all  # opcional, diagnóstico
     )
     from export import to_formatted_excel_cirurgias
 
@@ -265,13 +268,7 @@ with tabs[1]:
     st.markdown("#### Pré-preenchimento a partir de registros importados")
     colF1, colF2, colF3 = st.columns(3)
     with colF1:
-        # Reuso das opções de hospital da aba anterior
-        hosp_cad = st.selectbox("Hospital", options=[
-            "Hospital Santa Lucia Sul",
-            "Hospital Santa Lucia Norte",
-            "Hospital Maria Auxiliadora",
-        ], index=0)
-    # sugere ano/mês atuais
+        hosp_cad = st.selectbox("Hospital", options=HOSPITAL_OPCOES, index=0)
     now = datetime.now()
     with colF2:
         ano_cad = st.number_input("Ano (filtro base)", min_value=2000, max_value=2100, value=now.year, step=1)
@@ -279,19 +276,38 @@ with tabs[1]:
         mes_cad = st.number_input("Mês (filtro base)", min_value=1, max_value=12, value=now.month, step=1)
 
     prestadores_default = ["JOSE.ADORNO", "CASSIO CESAR", "FERNANDO AND", "SIMAO.MATOS"]
-    prestadores_filtro = st.text_input("Prestadores (filtro base, separar por ; )", value="; ".join(prestadores_default))
+    prestadores_filtro = st.text_input(
+        "Prestadores (filtro base, separar por ; ) — deixe vazio para não filtrar",
+        value="; ".join(prestadores_default)
+    )
     prestadores_lista_filtro = [p.strip() for p in prestadores_filtro.split(";") if p.strip()]
+
+    # Diagnóstico opcional: ver alguns registros base sem filtros
+    with st.expander("🔎 Diagnóstico rápido (ver primeiros registros da base)", expanded=False):
+        if st.button("Ver todos (limite 500)"):
+            try:
+                rows_all = list_registros_base_all(500)
+                df_all = pd.DataFrame(rows_all, columns=["Hospital", "Data", "Atendimento", "Paciente", "Convenio", "Prestador"])
+                st.dataframe(df_all, use_container_width=True, height=300)
+            except Exception as e:
+                st.error("Erro ao listar registros base.")
+                st.exception(e)
 
     st.caption("Use o filtro acima para selecionar um registro existente e pré-preencher a cirurgia.")
     try:
-        base_rows = find_registros_para_prefill(hosp_cad, ano=int(ano_cad), mes=int(mes_cad), prestadores=prestadores_lista_filtro)
+        base_rows = find_registros_para_prefill(
+            hosp_cad,
+            ano=int(ano_cad) if ano_cad else None,
+            mes=int(mes_cad) if mes_cad else None,
+            prestadores=prestadores_lista_filtro  # vazio = não filtra por prestador
+        )
         if base_rows:
             df_base = pd.DataFrame(base_rows, columns=["Hospital", "Data", "Atendimento", "Paciente", "Convenio", "Prestador"])
             st.dataframe(df_base, use_container_width=True, height=240)
             idx = st.number_input("Linha do registro base (índice)", min_value=0, max_value=len(df_base)-1, value=0, step=1)
             base = df_base.iloc[int(idx)]
         else:
-            st.info("Nenhum registro encontrado para pré-preenchimento.")
+            st.info("Nenhum registro encontrado para pré-preenchimento. Ajuste os filtros ou limpe o campo de prestadores.")
             base = None
     except Exception as e:
         st.error("Erro ao carregar registros base.")
@@ -370,11 +386,7 @@ with tabs[1]:
     st.markdown("#### Lista de Cirurgias")
     colL1, colL2, colL3, colL4 = st.columns([2, 2, 2, 2])
     with colL1:
-        hosp_f = st.selectbox("Filtro Hospital (lista)", options=["(todos)"] + [
-            "Hospital Santa Lucia Sul",
-            "Hospital Santa Lucia Norte",
-            "Hospital Maria Auxiliadora",
-        ], index=0)
+        hosp_f = st.selectbox("Filtro Hospital (lista)", options=["(todos)"] + HOSPITAL_OPCOES, index=0)
     with colL2:
         prest_f = st.text_input("Filtro Prestador (exato)", value="")
     with colL3:
@@ -462,6 +474,7 @@ with tabs[1]:
 # ====================================================================================
 with tabs[2]:
     st.subheader("Catálogos de Tipos de Procedimento e Situações da Cirurgia")
+
     # --------- Tipos de Procedimento -----------
     st.markdown("#### Tipos de Procedimento")
     colA, colB = st.columns([2, 1])
@@ -549,3 +562,4 @@ with tabs[2]:
         except Exception as e:
             st.error("Erro ao listar/editar situações.")
             st.exception(e)
+
