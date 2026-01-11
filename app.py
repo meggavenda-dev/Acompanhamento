@@ -6,7 +6,8 @@ import pandas as pd
 
 from db import (
     init_db, upsert_dataframe, read_all, DB_PATH, count_all,
-    upsert_autorizacoes, read_autorizacoes, count_autorizacoes, join_aut_por_atendimento
+    upsert_autorizacoes, read_autorizacoes, count_autorizacoes, join_aut_por_atendimento,
+    sync_autorizacoes_from_pacientes
 )
 from processing import process_uploaded_file
 from export import to_formatted_excel_by_hospital, to_formatted_excel_by_status
@@ -27,7 +28,7 @@ GITHUB_TOKEN_OK = bool(st.secrets.get("GITHUB_TOKEN", ""))
 
 st.set_page_config(page_title="Pacientes e Autorizações", layout="wide")
 st.title("Pacientes únicos por data, prestador e hospital")
-st.caption("Download automático do banco no GitHub → Upload → herança/filtragem/deduplicação → Hospital (lista) → editar Paciente → salvar → exportar → commit automático no GitHub. Agora com aba de Autorizações.")
+st.caption("Importa/edita pacientes e salva no banco → sincroniza autorizações a partir dos pacientes → acompanha status → exporta e comita no GitHub.")
 
 # 1) Baixa o DB do GitHub (se existir) antes de inicializar tabelas
 if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
@@ -103,7 +104,6 @@ with tab_pacientes:
     def _make_upload_id(file, hospital: str) -> str:
         name = getattr(file, "name", "sem_nome")
         size = getattr(file, "size", 0)
-        # hospital influencia o processamento; trocando hospital também deve resetar
         return f"{name}-{size}-{hospital.strip()}"
 
     # Botão para limpar e recomeçar (opcional)
@@ -144,7 +144,6 @@ with tab_pacientes:
         st.subheader("Revisar e editar nomes de Paciente (opcional)")
         st.caption("Edite apenas a coluna 'Paciente' se necessário. As demais estão bloqueadas para evitar alterações acidentais.")
 
-        # Editor com restrição: somente 'Paciente' editável
         df_to_edit = st.session_state.df_final.sort_values(
             ["Hospital", "Ano", "Mes", "Dia", "Paciente", "Prestador"]
         ).reset_index(drop=True)
@@ -152,7 +151,7 @@ with tab_pacientes:
         edited_df = st.data_editor(
             df_to_edit,
             use_container_width=True,
-            num_rows="fixed",  # não permite adicionar linhas
+            num_rows="fixed",
             column_config={
                 "Hospital": st.column_config.TextColumn(disabled=True),
                 "Ano": st.column_config.NumberColumn(disabled=True),
@@ -164,28 +163,24 @@ with tab_pacientes:
                 "Convenio": st.column_config.TextColumn(disabled=True),
                 "Prestador": st.column_config.TextColumn(disabled=True),
                 "Quarto": st.column_config.TextColumn(disabled=True),
-                # Paciente permanece editável
                 "Paciente": st.column_config.TextColumn(help="Clique para editar o nome do paciente."),
             },
             hide_index=True,
-            key=st.session_state.editor_key  # chave única por importação
+            key=st.session_state.editor_key
         )
 
-        # Atualiza o estado com as edições realizadas
         st.session_state.df_final = edited_df
 
         # ---------------- Gravar no Banco + commit automático no GitHub ----------------
         st.subheader("Persistência")
         if st.button("Salvar no banco (exemplo.db)", key="btn_salvar_pacientes"):
             try:
-                # 1) UPSERT local
                 upsert_dataframe(st.session_state.df_final)
 
-                # 2) Contagem para feedback
                 total = count_all()
                 st.success(f"Dados salvos com sucesso em exemplo.db. Total de linhas no banco: {total}")
 
-                # 3) Commit/push automático para GitHub
+                # Commit/push automático para GitHub
                 if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
                     try:
                         ok = upload_db_to_github(
@@ -202,7 +197,7 @@ with tab_pacientes:
                         st.error("Falha ao sincronizar com GitHub (commit automático).")
                         st.exception(e)
 
-                # 4) Limpa DF e editor para nova importação
+                # Limpa DF e editor para nova importação
                 st.session_state.df_final = None
                 st.session_state.editor_key = "editor_pacientes_after_save"
 
@@ -233,7 +228,6 @@ with tab_pacientes:
             use_container_width=True
         )
 
-        # Exportar direto do banco também (multi-aba por hospital)
         st.subheader("Exportar Excel por Hospital (dados do banco)")
         excel_bytes_db = to_formatted_excel_by_hospital(db_df)
         st.download_button(
@@ -248,107 +242,77 @@ with tab_pacientes:
 
 
 # ======================================================================================
-# ABA 2: ✅ Autorizações (nova)
+# ABA 2: ✅ Autorizações (sem upload; sincroniza a partir dos pacientes)
 # ======================================================================================
 with tab_autorizacoes:
-    st.subheader("Controle de Autorizações (Planilha)")
-    st.caption("Faça upload da planilha de pendências/autorizações. O 'Status' é inferido automaticamente a partir das Observações e pode ser ajustado manualmente.")
+    st.subheader("Controle de Autorizações (a partir dos pacientes do banco)")
+    st.caption("Clique em 'Sincronizar com pacientes do banco' para espelhar os pacientes na tabela de Autorizações. Depois edite Observações/Status/Guias/Fatura e salve.")
 
-    file_aut = st.file_uploader(
-        "Planilha de Autorizações (CSV/XLSX/XLS)",
-        type=["csv", "xlsx", "xls"],
-        key="uploader_aut"
-    )
+    # Sincronização/espelhamento
+    col_sync1, col_sync2 = st.columns(2)
+    with col_sync1:
+        if st.button("🔄 Sincronizar com pacientes do banco", help="Cria/atualiza autorizações para cada paciente (chave natural baseada em Atendimento; fallback Paciente+Data+Prestador+Hospital)."):
+            try:
+                novos, atualizados = sync_autorizacoes_from_pacientes(default_status="EM ANDAMENTO")
+                st.success(f"Sincronização concluída. Novos: {novos} | Atualizados: {atualizados}")
+            except Exception as e:
+                st.error("Falha ao sincronizar autorizações a partir dos pacientes.")
+                st.exception(e)
 
-    # Estado da aba
-    if "df_aut" not in st.session_state:
-        st.session_state.df_aut = None
+    with col_sync2:
+        if st.button("📥 Recarregar autorizações do banco"):
+            st.experimental_rerun()
 
-    # Normalizador de Status com base em 'Observacoes'
-    def infer_status_from_observacoes(obs_raw: str) -> str:
-        if not obs_raw:
-            return "EM ANDAMENTO"
-        T = str(obs_raw).upper()
-        if "PRONTO" in T:
-            return "PRONTO"
-        if "NÃO COBRAR" in T or "NAO COBRAR" in T:
-            return "NÃO COBRAR"
-        if "AGUARDAR PAR" in T or "PARAMETRIZA" in T:
-            return "AGUARDAR PARAMETRIZAÇÃO"
-        if "AGUARDAR DIGITAÇÃO" in T or "AGUARDAR DIGITACAO" in T or "AGUARDAR FILIAL" in T:
-            return "AGUARDAR FILIAL"
-        if "SERÁ DIGITADO" in T or "SERA DIGITADO" in T:
-            return "A DIGITAR"
-        if "PENDEN" in T or "CENSO" in T or "PENDENCIA DE AUTORIZA" in T:
-            return "PENDENTE AUTORIZAÇÃO"
-        return "EM ANDAMENTO"
+    # Carregar autorizações do banco
+    rows_aut = read_autorizacoes()
+    if rows_aut:
+        cols_aut = [
+            "Unidade","Atendimento","Paciente","Profissional","Data_Cirurgia","Convenio","Tipo_Procedimento",
+            "Observacoes","Guia_AMHPTISS","Guia_AMHPTISS_Complemento","Fatura","Status","UltimaAtualizacao"
+        ]
+        df_aut_db = pd.DataFrame(rows_aut, columns=cols_aut)
 
-    # Leitura e mapeamento de colunas da planilha de autorizações
-    if file_aut is not None:
-        try:
-            name = file_aut.name.lower()
-            if name.endswith(".xlsx"):
-                df_aut = pd.read_excel(file_aut, engine="openpyxl")
-            elif name.endswith(".xls"):
-                df_aut = pd.read_excel(file_aut, engine="xlrd")
-            else:
-                df_aut = pd.read_csv(file_aut, sep=",", encoding="utf-8")
+        # Filtros básicos
+        st.subheader("Filtros")
+        colf1, colf2, colf3, colf4 = st.columns(4)
+        with colf1:
+            status_sel = st.multiselect("Status", sorted(df_aut_db["Status"].dropna().unique().tolist()))
+        with colf2:
+            conv_sel = st.multiselect("Convênio", sorted(df_aut_db["Convenio"].dropna().unique().tolist()))
+        with colf3:
+            unid_sel = st.multiselect("Unidade (Hospital)", sorted(df_aut_db["Unidade"].dropna().unique().tolist()))
+        with colf4:
+            prest_sel = st.multiselect("Profissional", sorted(df_aut_db["Profissional"].dropna().unique().tolist()))
 
-            # Normaliza cabeçalhos e mapeia para nosso modelo
-            df_aut.columns = [str(c).strip() for c in df_aut.columns]
-            col_map_try = {
-                "UNIDADE": "Unidade",
-                "Número do Atendimento": "Atendimento",
-                "Paciente": "Paciente",
-                "Profissional": "Profissional",
-                "Data da Cirurgia": "Data_Cirurgia",
-                "Convênio": "Convenio",
-                "Tipo de Procedimento": "Tipo_Procedimento",
-                "Observações": "Observacoes",
-                "Guias AMHPTISS": "Guia_AMHPTISS",
-                "Guias AMHPTISS - Complemento": "Guia_AMHPTISS_Complemento",
-                "Fatura": "Fatura",
-            }
-            for c_src, c_dst in col_map_try.items():
-                if c_src in df_aut.columns:
-                    df_aut.rename(columns={c_src: c_dst}, inplace=True)
+        def _apply_filters(df):
+            out = df.copy()
+            if status_sel:
+                out = out[out["Status"].isin(status_sel)]
+            if conv_sel:
+                out = out[out["Convenio"].isin(conv_sel)]
+            if unid_sel:
+                out = out[out["Unidade"].isin(unid_sel)]
+            if prest_sel:
+                out = out[out["Profissional"].isin(prest_sel)]
+            return out
 
-            needed_cols = list(col_map_try.values())
-            for c in needed_cols:
-                if c not in df_aut.columns:
-                    df_aut[c] = pd.NA
+        df_filtered = _apply_filters(df_aut_db)
 
-            # Inferir Status a partir de Observacoes
-            df_aut["Status"] = df_aut["Observacoes"].fillna("").map(infer_status_from_observacoes)
-
-            # Ordenação inicial
-            df_aut = df_aut.sort_values(["Status", "Convenio", "Paciente"], kind="mergesort").reset_index(drop=True)
-
-            st.session_state.df_aut = df_aut
-            st.success(f"Planilha carregada. Linhas: {len(df_aut)}")
-
-        except Exception as e:
-            st.error("Falha ao ler a planilha de autorizações.")
-            st.exception(e)
-
-    # Editor / Métricas / Persistência / Export / Conciliação
-    if st.session_state.df_aut is not None and len(st.session_state.df_aut) > 0:
-        st.subheader("Revisar e editar (Observações / Status)")
-        st.caption("Colunas editáveis: Observações, Status, Guias e Fatura. As demais ficam bloqueadas para evitar alterações acidentais.")
-
-        df_to_edit = st.session_state.df_aut.copy()
+        # Editor: Observacoes/Status/Guias/Fatura editáveis
+        st.subheader("Revisar e editar (Observações / Status / Guias / Fatura)")
+        st.caption("Os campos espelhados dos pacientes (Unidade, Paciente, Profissional, Data_Cirurgia, Convênio) são atualizados pela sincronização e ficam bloqueados no editor.")
 
         edited_aut = st.data_editor(
-            df_to_edit,
+            df_filtered.sort_values(["Status", "Convenio", "Paciente"], kind="mergesort").reset_index(drop=True),
             use_container_width=True,
             num_rows="fixed",
             hide_index=True,
             column_config={
                 "Unidade": st.column_config.TextColumn(disabled=True),
-                "Atendimento": st.column_config.TextColumn(),
+                "Atendimento": st.column_config.TextColumn(disabled=False),
                 "Paciente": st.column_config.TextColumn(disabled=True),
                 "Profissional": st.column_config.TextColumn(disabled=True),
-                "Data_Cirurgia": st.column_config.TextColumn(),
+                "Data_Cirurgia": st.column_config.TextColumn(disabled=True),
                 "Convenio": st.column_config.TextColumn(disabled=True),
                 "Tipo_Procedimento": st.column_config.TextColumn(disabled=True),
                 "Observacoes": st.column_config.TextColumn(help="Edite o texto da observação."),
@@ -360,10 +324,10 @@ with tab_autorizacoes:
                     "A DIGITAR", "AGUARDAR PARAMETRIZAÇÃO",
                     "PENDENTE AUTORIZAÇÃO", "EM ANDAMENTO"
                 ], help="Ajuste manual, se necessário."),
+                "UltimaAtualizacao": st.column_config.TextColumn(disabled=True),
             },
             key="editor_autorizacoes"
         )
-        st.session_state.df_aut = edited_aut
 
         # Métricas por Status
         st.subheader("Métricas por Status")
@@ -374,11 +338,11 @@ with tab_autorizacoes:
             with cols_m[i % ncols]:
                 st.metric(label=status_name, value=int(qnt))
 
-        # Persistência no banco + GitHub
+        # Persistência + GitHub
         st.subheader("Persistência (Autorizações)")
         if st.button("Salvar autorizações no banco", key="btn_salvar_aut"):
             try:
-                upsert_autorizacoes(st.session_state.df_aut)
+                upsert_autorizacoes(edited_aut)
                 total_aut = count_autorizacoes()
                 st.success(f"Autorizações salvas. Total de linhas na tabela: {total_aut}")
 
@@ -391,16 +355,13 @@ with tab_autorizacoes:
                             path_in_repo=GH_PATH_IN_REPO,
                             branch=GH_BRANCH,
                             local_db_path=DB_PATH,
-                            commit_message="Atualiza tabela de autorizações via app"
+                            commit_message="Atualiza tabela de autorizações via app (sincronizada de pacientes)"
                         )
                         if ok:
                             st.success("Sincronização automática com GitHub concluída.")
                     except Exception as e:
                         st.error("Falha ao sincronizar com GitHub (autorizações).")
                         st.exception(e)
-
-                # Limpa estado para evitar regravação acidental
-                st.session_state.df_aut = None
 
             except Exception as e:
                 st.error("Falha ao salvar autorizações.")
@@ -430,32 +391,12 @@ with tab_autorizacoes:
                     df_join = pd.DataFrame(joined, columns=cols_join)
                     df_join["Match"] = df_join["PacienteDB"].notna()
                     st.dataframe(df_join, use_container_width=True)
-                    st.caption("Dica: use o filtro de texto para localizar divergências. Datas podem estar em formatos distintos; padronizar é possível em uma próxima melhoria.")
+                    st.caption("Use filtros para localizar divergências. Edite o campo 'Atendimento' nas autorizações quando necessário para casar com o banco de pacientes.")
                 else:
-                    st.info("Sem dados para conciliar ainda. Salve as autorizações e/ou o banco de pacientes.")
+                    st.info("Sem dados para conciliar ainda. Salve e/ou sincronize.")
             except Exception as e:
                 st.error("Falha ao gerar conciliação.")
                 st.exception(e)
 
     else:
-        # Mostrar conteúdo atual do banco de autorizações (quando não há upload ativo)
-        st.subheader("Conteúdo atual do banco (Autorizações)")
-        rows_aut = read_autorizacoes()
-        if rows_aut:
-            cols_aut = [
-                "Unidade","Atendimento","Paciente","Profissional","Data_Cirurgia","Convenio","Tipo_Procedimento",
-                "Observacoes","Guia_AMHPTISS","Guia_AMHPTISS_Complemento","Fatura","Status","UltimaAtualizacao"
-            ]
-            df_aut_db = pd.DataFrame(rows_aut, columns=cols_aut)
-            st.dataframe(df_aut_db, use_container_width=True)
-
-            excel_aut_db = to_formatted_excel_by_status(df_aut_db)
-            st.download_button(
-                label="Baixar Excel (Autorizações do Banco por Status)",
-                data=excel_aut_db,
-                file_name="Autorizacoes_banco_por_status.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="dl_autorizacoes_excel_banco"
-            )
-        else:
-            st.info("Tabela de autorizações ainda sem dados. Faça o upload na aba e clique em 'Salvar autorizações no banco'.")
+        st.info("Sincronize com os pacientes do banco para iniciar o acompanhamento.")
