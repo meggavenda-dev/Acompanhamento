@@ -73,8 +73,8 @@ except Exception:
     GITHUB_SYNC_AVAILABLE = False
 
 # ---- Config GitHub (usa st.secrets; sem UI) ----
-GH_OWNER = st.secrets.get("GH_OWNER", "seu-usuario-ou-org")
-GH_REPO  = st.secrets.get("GH_REPO", "seu-repo")
+GH_OWNER  = st.secrets.get("GH_OWNER", "seu-usuario-ou-org")
+GH_REPO   = st.secrets.get("GH_REPO", "seu-repo")
 GH_BRANCH = st.secrets.get("GH_BRANCH", "main")
 
 def _normalize_repo_path(p: str) -> str:
@@ -89,8 +89,8 @@ def _normalize_repo_path(p: str) -> str:
             p = p[1:]
     return p or "data/exemplo.db"
 
-GH_PATH_IN_REPO = _normalize_repo_path(st.secrets.get("GH_DB_PATH", "data/exemplo.db"))  # deve coincidir com DB_PATH
-GITHUB_TOKEN_OK = bool(st.secrets.get("GITHUB_TOKEN", ""))
+GH_PATH_IN_REPO  = _normalize_repo_path(st.secrets.get("GH_DB_PATH", "data/exemplo.db"))  # deve coincidir com DB_PATH
+GITHUB_TOKEN_OK  = bool(st.secrets.get("GITHUB_TOKEN", ""))
 
 # =========================
 # CONFIGURAÇÃO APP
@@ -98,6 +98,14 @@ GITHUB_TOKEN_OK = bool(st.secrets.get("GITHUB_TOKEN", ""))
 st.set_page_config(page_title="Pacientes e Autorizações", layout="wide")
 st.title("Pacientes únicos por data, prestador e hospital")
 st.caption("Importa/edita pacientes e salva no banco → sincroniza autorizações a partir dos pacientes → acompanha status/equipe → exporta e comita no GitHub.")
+
+# Flags de sessão
+if "db_downloaded_shown" not in st.session_state:
+    st.session_state.db_downloaded_shown = False
+if "aut_sync_done" not in st.session_state:
+    st.session_state.aut_sync_done = False
+if "aut_sync_done_in_tab" not in st.session_state:
+    st.session_state.aut_sync_done_in_tab = False
 
 # 1) Baixa o DB do GitHub (se existir) antes de inicializar tabelas
 if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
@@ -109,16 +117,34 @@ if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
             branch=GH_BRANCH,
             local_db_path=DB_PATH
         )
-        if downloaded:
+        if downloaded and not st.session_state.db_downloaded_shown:
             st.success("Banco baixado do GitHub.")
-        else:
+            st.session_state.db_downloaded_shown = True
+        elif not downloaded and not st.session_state.db_downloaded_shown:
             st.info("Banco não encontrado no GitHub (primeiro uso). Será criado localmente ao salvar.")
+            st.session_state.db_downloaded_shown = True
     except Exception as e:
         st.warning("Não foi possível baixar o banco do GitHub. Verifique token/permissões em st.secrets.")
         st.exception(e)
 
 # Inicializa DB (cria tabela/índices se necessário)
 init_db()
+
+# --- Patch 1: Auto-sync de Autorizações uma vez por sessão ---
+try:
+    if not st.session_state.aut_sync_done:
+        total_aut = count_autorizacoes()
+        total_pac = count_all()
+        if (total_pac > 0) and (total_aut == 0):
+            novos, atualizados = sync_autorizacoes_from_pacientes(default_status="EM ANDAMENTO")
+            st.session_state.aut_sync_done = True
+            if novos or atualizados:
+                st.info(f"Autorizações sincronizadas automaticamente: novos={novos}, atualizados={atualizados}.")
+        else:
+            st.session_state.aut_sync_done = True
+except Exception as e:
+    st.warning("Não foi possível realizar a auto-sincronização das autorizações nesta sessão.")
+    st.exception(e)
 
 # ---------------- Navegação por Abas ----------------
 tab_pacientes, tab_autorizacoes = st.tabs(["📋 Pacientes", "✅ Autorizações"])
@@ -315,7 +341,20 @@ with tab_autorizacoes:
     st.subheader("Controle de Autorizações (a partir dos pacientes do banco)")
     st.caption("Clique em 'Sincronizar com pacientes do banco' para espelhar autorizações. Depois edite Observações/Status/Guias/Fatura e salve.")
 
-    # Sincronização pai/equipe
+    # --- Patch 2: Auto-sync (fallback na abertura da aba, uma vez por sessão) ---
+    try:
+        total_aut = count_autorizacoes()
+        total_pac = count_all()
+        if (total_aut == 0) and (total_pac > 0) and not st.session_state.aut_sync_done_in_tab:
+            novos, atualizados = sync_autorizacoes_from_pacientes(default_status="EM ANDAMENTO")
+            st.session_state.aut_sync_done_in_tab = True
+            if novos or atualizados:
+                st.success(f"Autorizações sincronizadas automaticamente na abertura da aba: novos={novos}, atualizados={atualizados}.")
+    except Exception as e:
+        st.warning("Auto-sincronização na aba falhou.")
+        st.exception(e)
+
+    # Sincronização pai/equipe (manual)
     col_sync1, col_sync2, col_sync3 = st.columns(3)
     with col_sync1:
         if st.button("🔄 Sincronizar com pacientes do banco", help="Cria/atualiza autorizações (ATT ou FALLBACK: Paciente+Data+Unidade)."):
@@ -524,8 +563,8 @@ with tab_autorizacoes:
                 hide_index=True,
                 column_config={
                     "NaturalKey": st.column_config.TextColumn(disabled=True),
-                    "Prestador": st.column_config.TextColumn(help="Nome do profissional."),
-                    "Papel": st.column_config.SelectboxColumn(
+                    "Prestador":  st.column_config.TextColumn(help="Nome do profissional."),
+                    "Papel":      st.column_config.SelectboxColumn(
                         options=[
                             "", "Cirurgião", "Auxiliar I", "Auxiliar II", "Auxiliar III",
                             "Anestesista", "Instrumentador", "Endoscopista", "Visitante/Parecer"
@@ -535,7 +574,7 @@ with tab_autorizacoes:
                     "Participacao": st.column_config.TextColumn(
                         help="Percentual ou descrição (ex.: 70%, 'Responsável')."
                     ),
-                    "Observacao": st.column_config.TextColumn(help="Comentário livre."),
+                    "Observacao":   st.column_config.TextColumn(help="Comentário livre."),
                 },
                 key=f"editor_equipe_{sel_nk}"
             )
@@ -593,3 +632,4 @@ with tab_autorizacoes:
         )
     else:
         st.info("Sincronize com os pacientes do banco para iniciar o acompanhamento.")
+
