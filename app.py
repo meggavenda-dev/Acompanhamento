@@ -2,7 +2,6 @@
 # app.py
 import os
 import sys
-import inspect
 import streamlit as st
 import pandas as pd
 
@@ -63,7 +62,7 @@ from processing import process_uploaded_file
 from export import (
     to_formatted_excel_by_hospital,
     to_formatted_excel_by_status,
-    to_formatted_excel_authorizations_with_team  # novo export completo
+    to_formatted_excel_authorizations_with_team  # export completo Autorizações + Equipes
 )
 
 # --- GitHub sync (baixar/subir o .db) ---
@@ -99,10 +98,6 @@ GITHUB_TOKEN_OK = bool(st.secrets.get("GITHUB_TOKEN", ""))
 st.set_page_config(page_title="Pacientes e Autorizações", layout="wide")
 st.title("Pacientes únicos por data, prestador e hospital")
 st.caption("Importa/edita pacientes e salva no banco → sincroniza autorizações a partir dos pacientes → acompanha status/equipe → exporta e comita no GitHub.")
-
-# Diagnóstico rápido do caminho do módulo db carregado (opcional)
-st.caption("Módulo 'db' carregado de:")
-st.code(getattr(DBMOD, "__file__", "(desconhecido)"))
 
 # 1) Baixa o DB do GitHub (se existir) antes de inicializar tabelas
 if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
@@ -365,7 +360,7 @@ with tab_autorizacoes:
         with colf4:
             prest_sel = st.multiselect("Profissional (principal)", sorted(df_aut_db["Profissional"].dropna().unique().tolist()))
 
-        def _apply_filters(df):
+        def _apply_filters(df: pd.DataFrame) -> pd.DataFrame:
             out = df.copy()
             if status_sel:
                 out = out[out["Status"].isin(status_sel)]
@@ -488,21 +483,31 @@ with tab_autorizacoes:
             ]
             df_aut_nk = pd.DataFrame(rows_aut_nk, columns=cols_aut_nk)
 
-            def _label_row(r):
+            def _label_row(r: pd.Series) -> str:
                 att = str(r["Atendimento"]).strip()
                 base = f"{r['Paciente']} — {r['Data_Cirurgia']} — {r['Unidade']}"
                 return f"{base} (ATT:{att})" if att else base
 
             opts = df_aut_nk.apply(_label_row, axis=1).tolist()
-            selected = st.selectbox("Selecione a autorização para editar a equipe", options=opts, index=0, key="sel_aut_equipe")
+            selected = st.selectbox(
+                "Selecione a autorização para editar a equipe",
+                options=opts,
+                index=0,
+                key="sel_aut_equipe"
+            )
             sel_row = df_aut_nk.iloc[opts.index(selected)]
             sel_nk = sel_row["NaturalKey"]
 
             # Carrega equipe atual
             equipe_rows = read_equipes(sel_nk)
-            df_equipe = pd.DataFrame(equipe_rows, columns=["NaturalKey","Prestador","Papel","Participacao","Observacao"])
+            df_equipe = pd.DataFrame(
+                equipe_rows,
+                columns=["NaturalKey","Prestador","Papel","Participacao","Observacao"]
+            )
             if df_equipe.empty:
-                df_equipe = pd.DataFrame(columns=["NaturalKey","Prestador","Papel","Participacao","Observacao"])
+                df_equipe = pd.DataFrame(
+                    columns=["NaturalKey","Prestador","Papel","Participacao","Observacao"]
+                )
             df_equipe["NaturalKey"] = sel_nk  # garante NK
 
             st.caption("Prestadores candidatos (extraídos do módulo Pacientes para esta autorização):")
@@ -516,3 +521,75 @@ with tab_autorizacoes:
                 df_equipe,
                 use_container_width=True,
                 num_rows="dynamic",
+                hide_index=True,
+                column_config={
+                    "NaturalKey": st.column_config.TextColumn(disabled=True),
+                    "Prestador": st.column_config.TextColumn(help="Nome do profissional."),
+                    "Papel": st.column_config.SelectboxColumn(
+                        options=[
+                            "", "Cirurgião", "Auxiliar I", "Auxiliar II", "Auxiliar III",
+                            "Anestesista", "Instrumentador", "Endoscopista", "Visitante/Parecer"
+                        ],
+                        help="Função na equipe."
+                    ),
+                    "Participacao": st.column_config.TextColumn(
+                        help="Percentual ou descrição (ex.: 70%, 'Responsável')."
+                    ),
+                    "Observacao": st.column_config.TextColumn(help="Comentário livre."),
+                },
+                key=f"editor_equipe_{sel_nk}"
+            )
+
+            if st.button("Salvar equipe desta autorização", key="btn_salvar_equipe"):
+                try:
+                    upsert_equipes(sel_nk, edited_team)
+                    st.success("Equipe salva com sucesso.")
+                except Exception as e:
+                    st.error("Falha ao salvar equipe.")
+                    st.exception(e)
+        else:
+            st.info("Não há autorizações cadastradas ainda. Sincronize com os pacientes do banco.")
+
+        # ---------------- Export completo: Autorizações + Equipes ----------------
+        st.subheader("Exportar Autorizações + Equipes (completo)")
+        # Autorizações com NK
+        rows_aut_nk_all = read_autorizacoes(include_nk=True)
+        auth_cols = [
+            "Unidade","Atendimento","Paciente","Profissional","Data_Cirurgia","Convenio","Tipo_Procedimento",
+            "Observacoes","Guia_AMHPTISS","Guia_AMHPTISS_Complemento","Fatura","Status","UltimaAtualizacao","NaturalKey"
+        ]
+        auth_df = pd.DataFrame(rows_aut_nk_all, columns=auth_cols)
+
+        # Equipes de todas as autorizações
+        team_rows_all = []
+        if not auth_df.empty and "NaturalKey" in auth_df.columns:
+            for nk in auth_df["NaturalKey"].dropna().astype(str).unique():
+                rows_eq = read_equipes(nk)
+                if rows_eq:
+                    team_rows_all.extend(rows_eq)
+
+        team_df = pd.DataFrame(
+            team_rows_all,
+            columns=["NaturalKey","Prestador","Papel","Participacao","Observacao"]
+        )
+
+        per_auth_tabs = st.toggle(
+            "Criar aba por autorização (pode criar muitas abas)",
+            value=False,
+            key="toggle_tabs_per_auth"
+        )
+
+        excel_full = to_formatted_excel_authorizations_with_team(
+            auth_df=auth_df,
+            team_df=team_df,
+            per_authorization_tabs=per_auth_tabs
+        )
+        st.download_button(
+            label="Baixar Excel completo (Autorizações + Equipes)",
+            data=excel_full,
+            file_name="Autorizacoes_Equipes_Completo.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dl_aut_and_team"
+        )
+    else:
+        st.info("Sincronize com os pacientes do banco para iniciar o acompanhamento.")
