@@ -7,7 +7,9 @@ import pandas as pd
 from db import (
     init_db, upsert_dataframe, read_all, DB_PATH, count_all,
     upsert_autorizacoes, read_autorizacoes, count_autorizacoes, join_aut_por_atendimento,
-    sync_autorizacoes_from_pacientes
+    sync_autorizacoes_from_pacientes,
+    # Equipe (filha)
+    read_equipes, upsert_equipes, distinct_prestadores_for_auth, sync_equipes_from_pacientes
 )
 from processing import process_uploaded_file
 from export import to_formatted_excel_by_hospital, to_formatted_excel_by_status
@@ -23,12 +25,25 @@ except Exception:
 GH_OWNER = st.secrets.get("GH_OWNER", "seu-usuario-ou-org")
 GH_REPO = st.secrets.get("GH_REPO", "seu-repo")
 GH_BRANCH = st.secrets.get("GH_BRANCH", "main")
-GH_PATH_IN_REPO = st.secrets.get("GH_DB_PATH", "data/exemplo.db")  # deve coincidir com DB_PATH em db.py
+
+def _normalize_repo_path(p: str) -> str:
+    """Evita erro 422 'path cannot start with a slash' na API de Contents do GitHub."""
+    p = (p or "").strip()
+    while p.startswith("/") or p.startswith("./") or p.startswith(".\\") or p.startswith("\\"):
+        if p.startswith("./"):
+            p = p[2:]
+        elif p.startswith(".\\"):
+            p = p[3:]
+        else:
+            p = p[1:]
+    return p or "data/exemplo.db"
+
+GH_PATH_IN_REPO = _normalize_repo_path(st.secrets.get("GH_DB_PATH", "data/exemplo.db"))  # deve coincidir com DB_PATH em db.py
 GITHUB_TOKEN_OK = bool(st.secrets.get("GITHUB_TOKEN", ""))
 
 st.set_page_config(page_title="Pacientes e Autorizações", layout="wide")
 st.title("Pacientes únicos por data, prestador e hospital")
-st.caption("Importa/edita pacientes e salva no banco → sincroniza autorizações a partir dos pacientes → acompanha status → exporta e comita no GitHub.")
+st.caption("Importa/edita pacientes e salva no banco → sincroniza autorizações a partir dos pacientes → acompanha status/equipe → exporta e comita no GitHub.")
 
 # 1) Baixa o DB do GitHub (se existir) antes de inicializar tabelas
 if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
@@ -151,7 +166,7 @@ with tab_pacientes:
         edited_df = st.data_editor(
             df_to_edit,
             use_container_width=True,
-            num_rows="fixed",
+            num_rows="fixed",  # não permite adicionar linhas
             column_config={
                 "Hospital": st.column_config.TextColumn(disabled=True),
                 "Ano": st.column_config.NumberColumn(disabled=True),
@@ -163,24 +178,28 @@ with tab_pacientes:
                 "Convenio": st.column_config.TextColumn(disabled=True),
                 "Prestador": st.column_config.TextColumn(disabled=True),
                 "Quarto": st.column_config.TextColumn(disabled=True),
+                # Paciente permanece editável
                 "Paciente": st.column_config.TextColumn(help="Clique para editar o nome do paciente."),
             },
             hide_index=True,
-            key=st.session_state.editor_key
+            key=st.session_state.editor_key  # chave única por importação
         )
 
+        # Atualiza o estado com as edições realizadas
         st.session_state.df_final = edited_df
 
         # ---------------- Gravar no Banco + commit automático no GitHub ----------------
         st.subheader("Persistência")
         if st.button("Salvar no banco (exemplo.db)", key="btn_salvar_pacientes"):
             try:
+                # 1) UPSERT local
                 upsert_dataframe(st.session_state.df_final)
 
+                # 2) Contagem para feedback
                 total = count_all()
                 st.success(f"Dados salvos com sucesso em exemplo.db. Total de linhas no banco: {total}")
 
-                # Commit/push automático para GitHub
+                # 3) Commit/push automático para GitHub
                 if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
                     try:
                         ok = upload_db_to_github(
@@ -197,7 +216,7 @@ with tab_pacientes:
                         st.error("Falha ao sincronizar com GitHub (commit automático).")
                         st.exception(e)
 
-                # Limpa DF e editor para nova importação
+                # 4) Limpa DF e editor para nova importação
                 st.session_state.df_final = None
                 st.session_state.editor_key = "editor_pacientes_after_save"
 
@@ -228,6 +247,7 @@ with tab_pacientes:
             use_container_width=True
         )
 
+        # Exportar direto do banco também (multi-aba por hospital)
         st.subheader("Exportar Excel por Hospital (dados do banco)")
         excel_bytes_db = to_formatted_excel_by_hospital(db_df)
         st.download_button(
@@ -248,10 +268,13 @@ with tab_autorizacoes:
     st.subheader("Controle de Autorizações (a partir dos pacientes do banco)")
     st.caption("Clique em 'Sincronizar com pacientes do banco' para espelhar os pacientes na tabela de Autorizações. Depois edite Observações/Status/Guias/Fatura e salve.")
 
-    # Sincronização/espelhamento
-    col_sync1, col_sync2 = st.columns(2)
+    # Sincronização/espelhamento (pai)
+    col_sync1, col_sync2, col_sync3 = st.columns(3)
     with col_sync1:
-        if st.button("🔄 Sincronizar com pacientes do banco", help="Cria/atualiza autorizações para cada paciente (chave natural baseada em Atendimento; fallback Paciente+Data+Prestador+Hospital)."):
+        if st.button(
+            "🔄 Sincronizar com pacientes do banco",
+            help="Cria/atualiza autorizações para cada paciente (ATT ou FALLBACK: Paciente+Data+Unidade)."
+        ):
             try:
                 novos, atualizados = sync_autorizacoes_from_pacientes(default_status="EM ANDAMENTO")
                 st.success(f"Sincronização concluída. Novos: {novos} | Atualizados: {atualizados}")
@@ -263,8 +286,17 @@ with tab_autorizacoes:
         if st.button("📥 Recarregar autorizações do banco"):
             st.experimental_rerun()
 
-    # Carregar autorizações do banco
-    rows_aut = read_autorizacoes()
+    with col_sync3:
+        if st.button("👥 Sincronizar equipes (a partir dos pacientes)", help="Inclui prestadores candidatos na equipe de cada autorização. Não define papel/participação."):
+            try:
+                novos_eq, afetadas = sync_equipes_from_pacientes()
+                st.success(f"Equipes sincronizadas. Novas linhas: {novos_eq} | Autorizações afetadas: {afetadas}")
+            except Exception as e:
+                st.error("Falha ao sincronizar equipes.")
+                st.exception(e)
+
+    # Carregar autorizações do banco (sem NK para grid principal)
+    rows_aut = read_autorizacoes(include_nk=False)
     if rows_aut:
         cols_aut = [
             "Unidade","Atendimento","Paciente","Profissional","Data_Cirurgia","Convenio","Tipo_Procedimento",
@@ -282,7 +314,7 @@ with tab_autorizacoes:
         with colf3:
             unid_sel = st.multiselect("Unidade (Hospital)", sorted(df_aut_db["Unidade"].dropna().unique().tolist()))
         with colf4:
-            prest_sel = st.multiselect("Profissional", sorted(df_aut_db["Profissional"].dropna().unique().tolist()))
+            prest_sel = st.multiselect("Profissional (principal)", sorted(df_aut_db["Profissional"].dropna().unique().tolist()))
 
         def _apply_filters(df):
             out = df.copy()
@@ -397,6 +429,70 @@ with tab_autorizacoes:
             except Exception as e:
                 st.error("Falha ao gerar conciliação.")
                 st.exception(e)
+
+        # ---------------- Equipe Cirúrgica (filha) ----------------
+        st.subheader("Equipe Cirúrgica por Autorização")
+
+        # Carregamos autorizações com NaturalKey para escolher uma
+        rows_aut_nk = read_autorizacoes(include_nk=True)
+        if rows_aut_nk:
+            cols_aut_nk = [
+                "Unidade","Atendimento","Paciente","Profissional","Data_Cirurgia","Convenio","Tipo_Procedimento",
+                "Observacoes","Guia_AMHPTISS","Guia_AMHPTISS_Complemento","Fatura","Status","UltimaAtualizacao","NaturalKey"
+            ]
+            df_aut_nk = pd.DataFrame(rows_aut_nk, columns=cols_aut_nk)
+
+            def _label_row(r):
+                att = str(r["Atendimento"]).strip()
+                base = f"{r['Paciente']} — {r['Data_Cirurgia']} — {r['Unidade']}"
+                return f"{base} (ATT:{att})" if att else base
+
+            opts = df_aut_nk.apply(_label_row, axis=1).tolist()
+            selected = st.selectbox("Selecione a autorização para editar a equipe", options=opts, index=0, key="sel_aut_equipe")
+            sel_row = df_aut_nk.iloc[opts.index(selected)]
+            sel_nk = sel_row["NaturalKey"]
+
+            # Carrega equipe atual
+            equipe_rows = read_equipes(sel_nk)
+            df_equipe = pd.DataFrame(equipe_rows, columns=["NaturalKey","Prestador","Papel","Participacao","Observacao"])
+            if df_equipe.empty:
+                df_equipe = pd.DataFrame(columns=["NaturalKey","Prestador","Papel","Participacao","Observacao"])
+            df_equipe["NaturalKey"] = sel_nk  # garante NK
+
+            st.caption("Prestadores candidatos (extraídos do módulo Pacientes para esta autorização):")
+            try:
+                candidatos = distinct_prestadores_for_auth(sel_nk)
+                st.write(", ".join(candidatos) if candidatos else "—")
+            except Exception:
+                st.write("—")
+
+            edited_team = st.data_editor(
+                df_equipe,
+                use_container_width=True,
+                num_rows="dynamic",
+                hide_index=True,
+                column_config={
+                    "NaturalKey": st.column_config.TextColumn(disabled=True),
+                    "Prestador": st.column_config.TextColumn(help="Nome do profissional."),
+                    "Papel": st.column_config.SelectboxColumn(options=[
+                        "", "Cirurgião", "Auxiliar I", "Auxiliar II", "Auxiliar III",
+                        "Anestesista", "Instrumentador", "Endoscopista", "Visitante/Parecer"
+                    ], help="Função na equipe."),
+                    "Participacao": st.column_config.TextColumn(help="Percentual ou descrição (ex.: 70%, 'Responsável')."),
+                    "Observacao": st.column_config.TextColumn(help="Comentário livre."),
+                },
+                key=f"editor_equipe_{sel_nk}"
+            )
+
+            if st.button("Salvar equipe desta autorização", key="btn_salvar_equipe"):
+                try:
+                    upsert_equipes(sel_nk, edited_team)
+                    st.success("Equipe salva com sucesso.")
+                except Exception as e:
+                    st.error("Falha ao salvar equipe.")
+                    st.exception(e)
+        else:
+            st.info("Não há autorizações cadastradas ainda. Sincronize com os pacientes do banco.")
 
     else:
         st.info("Sincronize com os pacientes do banco para iniciar o acompanhamento.")
