@@ -1,650 +1,463 @@
 
-# app.py
+# db.py
+from __future__ import annotations
+
 import os
-import sys
-import streamlit as st
-import pandas as pd
+import math
+from typing import Optional, List, Dict, Any
+from sqlalchemy import create_engine, text
 
-# =========================
-# IMPORT SEGURO DO MÓDULO db
-# =========================
-try:
-    import db as DBMOD  # importa o módulo inteiro local
-except Exception as e:
-    st.error("Falha ao importar o módulo local 'db'. Veja detalhes abaixo para diagnosticar.")
-    st.write("sys.path:", sys.path)
-    st.write("Arquivo atual (__file__):", __file__)
-    st.exception(e)
-    st.stop()
+# ---------------- Configuração de caminho persistente ----------------
+MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(MODULE_DIR, "data")
+os.makedirs(DATA_DIR, exist_ok=True)
 
-# Alias das funções/constantes usadas pelo app
-init_db                          = getattr(DBMOD, "init_db", None)
-upsert_dataframe                 = getattr(DBMOD, "upsert_dataframe", None)
-read_all                         = getattr(DBMOD, "read_all", None)
-DB_PATH                          = getattr(DBMOD, "DB_PATH", None)
-count_all                        = getattr(DBMOD, "count_all", None)
-upsert_autorizacoes              = getattr(DBMOD, "upsert_autorizacoes", None)
-read_autorizacoes                = getattr(DBMOD, "read_autorizacoes", None)
-count_autorizacoes               = getattr(DBMOD, "count_autorizacoes", None)
-join_aut_por_atendimento         = getattr(DBMOD, "join_aut_por_atendimento", None)
-sync_autorizacoes_from_pacientes = getattr(DBMOD, "sync_autorizacoes_from_pacientes", None)
-# Equipe (filha)
-read_equipes                     = getattr(DBMOD, "read_equipes", None)
-upsert_equipes                   = getattr(DBMOD, "upsert_equipes", None)
-distinct_prestadores_for_auth    = getattr(DBMOD, "distinct_prestadores_for_auth", None)
-sync_equipes_from_pacientes      = getattr(DBMOD, "sync_equipes_from_pacientes", None)
+DB_PATH = os.path.join(DATA_DIR, "exemplo.db")
+DB_URI = f"sqlite:///{DB_PATH}"
 
-_missing = [name for name, ref in [
-    ("init_db", init_db),
-    ("upsert_dataframe", upsert_dataframe),
-    ("read_all", read_all),
-    ("DB_PATH", DB_PATH),
-    ("count_all", count_all),
-    ("upsert_autorizacoes", upsert_autorizacoes),
-    ("read_autorizacoes", read_autorizacoes),
-    ("count_autorizacoes", count_autorizacoes),
-    ("join_aut_por_atendimento", join_aut_por_atendimento),
-    ("sync_autorizacoes_from_pacientes", sync_autorizacoes_from_pacientes),
-    ("read_equipes", read_equipes),
-    ("upsert_equipes", upsert_equipes),
-    ("distinct_prestadores_for_auth", distinct_prestadores_for_auth),
-    ("sync_equipes_from_pacientes", sync_equipes_from_pacientes),
-] if ref is None]
+_ENGINE = None
+def get_engine():
+    global _ENGINE
+    if _ENGINE is None:
+        _ENGINE = create_engine(DB_URI, future=True, echo=False)
+    return _ENGINE
 
-if _missing:
-    st.error("As seguintes funções/itens não foram encontradas em 'db.py': " + ", ".join(_missing))
-    st.stop()
 
-# =========================
-# IMPORT DEMAIS MÓDULOS
-# =========================
-from processing import process_uploaded_file
-from export import (
-    to_formatted_excel_by_hospital,
-    to_formatted_excel_by_status,
-    to_formatted_excel_authorizations_with_team
-)
+def init_db():
+    """
+    Cria/atualiza estrutura do banco:
+    - pacientes_unicos_por_dia_prestador (já existente)
+    - procedimento_tipos (NOVO)
+    - cirurgia_situacoes (NOVO)
+    - cirurgias (NOVO)
+    """
+    engine = get_engine()
+    with engine.begin() as conn:
+        # ---- Tabela original (mantida) ----
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS pacientes_unicos_por_dia_prestador (
+            Hospital    TEXT,
+            Ano         INTEGER,
+            Mes         INTEGER,
+            Dia         INTEGER,
+            Data        TEXT,
+            Atendimento TEXT,
+            Paciente    TEXT,
+            Aviso       TEXT,
+            Convenio    TEXT,
+            Prestador   TEXT,
+            Quarto      TEXT
+        );
+        """))
+        conn.execute(text("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_unicidade
+        ON pacientes_unicos_por_dia_prestador (Data, Paciente, Prestador, Hospital);
+        """))
+        conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS idx_hospital_calendario
+        ON pacientes_unicos_por_dia_prestador (Hospital, Ano, Mes, Dia);
+        """))
+        conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS idx_hospital_calendario_prestador
+        ON pacientes_unicos_por_dia_prestador (Hospital, Ano, Mes, Dia, Prestador);
+        """))
 
-# --- GitHub sync (baixar/subir o .db) ---
-try:
-    from github_sync import download_db_from_github, upload_db_to_github
-    GITHUB_SYNC_AVAILABLE = True
-except Exception:
-    GITHUB_SYNC_AVAILABLE = False
+        # ---- Catálogo: Tipos de Procedimento ----
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS procedimento_tipos (
+            id     INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome   TEXT NOT NULL UNIQUE,
+            ativo  INTEGER NOT NULL DEFAULT 1,
+            ordem  INTEGER DEFAULT 0
+        );
+        """))
+        conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS idx_proc_tipos_ativo
+        ON procedimento_tipos (ativo, ordem, nome);
+        """))
 
-# ---- Config GitHub (usa st.secrets; sem UI) ----
-GH_OWNER  = st.secrets.get("GH_OWNER", "seu-usuario-ou-org")
-GH_REPO   = st.secrets.get("GH_REPO", "seu-repo")
-GH_BRANCH = st.secrets.get("GH_BRANCH", "main")
+        # ---- Catálogo: Situações de Cirurgia ----
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS cirurgia_situacoes (
+            id     INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome   TEXT NOT NULL UNIQUE,
+            ativo  INTEGER NOT NULL DEFAULT 1,
+            ordem  INTEGER DEFAULT 0
+        );
+        """))
+        conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS idx_cir_sit_ativo
+        ON cirurgia_situacoes (ativo, ordem, nome);
+        """))
 
-def _normalize_repo_path(p: str) -> str:
-    """Evita erro 422 'path cannot start with a slash' na API de Contents do GitHub."""
-    p = (p or "").strip()
-    while p.startswith("/") or p.startswith("./") or p.startswith(".\\") or p.startswith("\\"):
-        if p.startswith("./"):
-            p = p[2:]
-        elif p.startswith(".\\"):
-            p = p[3:]
-        else:
-            p = p[1:]
-    return p or "data/exemplo.db"
+        # ---- Registro de Cirurgias ----
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS cirurgias (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            Hospital TEXT NOT NULL,
+            Atendimento TEXT,
+            Paciente TEXT,
+            Prestador TEXT,
+            Data_Cirurgia TEXT,         -- formato livre (ex.: dd/MM/yyyy); pode ser 'YYYY-MM-DD' também
+            Convenio TEXT,
+            Procedimento_Tipo_ID INTEGER,
+            Situacao_ID INTEGER,
+            Guia_AMHPTISS TEXT,
+            Guia_AMHPTISS_Complemento TEXT,
+            Fatura TEXT,
+            Observacoes TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT,
+            FOREIGN KEY (Procedimento_Tipo_ID) REFERENCES procedimento_tipos(id),
+            FOREIGN KEY (Situacao_ID) REFERENCES cirurgia_situacoes(id)
+        );
+        """))
+        # Índices úteis
+        conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS idx_cirurgias_hosp_data
+        ON cirurgias (Hospital, Data_Cirurgia);
+        """))
+        conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS idx_cirurgias_atendimento
+        ON cirurgias (Atendimento);
+        """))
+        conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS idx_cirurgias_paciente
+        ON cirurgias (Paciente);
+        """))
+        # Evita duplicar mesma cirurgia (ajuste se quiser outra regra)
+        conn.execute(text("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_cirurgia_unica
+        ON cirurgias (Hospital, Atendimento, Prestador, Data_Cirurgia);
+        """))
 
-GH_PATH_IN_REPO  = _normalize_repo_path(st.secrets.get("GH_DB_PATH", "data/exemplo.db"))  # deve coincidir com DB_PATH
-GITHUB_TOKEN_OK  = bool(st.secrets.get("GITHUB_TOKEN", ""))
 
-# =========================
-# CONFIGURAÇÃO APP
-# =========================
-st.set_page_config(page_title="Pacientes e Autorizações", layout="wide")
-st.title("Pacientes únicos por data, prestador e hospital")
-st.caption("Importa/edita pacientes e salva no banco → sincroniza autorizações a partir dos pacientes → acompanha status/equipe → exporta e comita no GitHub.")
-
-# Flags de sessão
-if "db_downloaded_shown" not in st.session_state:
-    st.session_state.db_downloaded_shown = False
-if "aut_sync_done" not in st.session_state:
-    st.session_state.aut_sync_done = False
-if "aut_sync_done_in_tab" not in st.session_state:
-    st.session_state.aut_sync_done_in_tab = False
-
-# --- helper para garantir que o arquivo/pasta são graváveis
-def _ensure_writable(path: str):
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-    except Exception:
-        pass
-    try:
-        with open(path, "ab"):
+def _safe_int(val, default: int = 0) -> int:
+    if val is None:
+        return default
+    if isinstance(val, float):
+        try:
+            if math.isnan(val):
+                return default
+        except Exception:
             pass
-        os.chmod(path, 0o666)
-    except Exception as _e:
-        st.warning(f"Não foi possível garantir escrita em: {path}. Detalhes: {type(_e).__name__}")
-
-# 1) Baixa o DB do GitHub (se existir) antes de inicializar tabelas
-if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
+    s = str(val).strip()
+    if s == "":
+        return default
     try:
-        downloaded = download_db_from_github(
-            owner=GH_OWNER,
-            repo=GH_REPO,
-            path_in_repo=GH_PATH_IN_REPO,
-            branch=GH_BRANCH,
-            local_db_path=DB_PATH
+        return int(float(s))
+    except Exception:
+        return default
+
+
+def _safe_str(val, default: str = "") -> str:
+    if val is None:
+        return default
+    if isinstance(val, float):
+        try:
+            if math.isnan(val):
+                return default
+        except Exception:
+            pass
+    return str(val).strip()
+
+
+# ---------------- UPSERT original ----------------
+def upsert_dataframe(df):
+    if df is None or len(df) == 0:
+        return
+    if "Paciente" not in df.columns:
+        raise ValueError("Coluna 'Paciente' não encontrada no DataFrame.")
+    blank_mask = df["Paciente"].astype(str).str.strip() == ""
+    num_blank = int(blank_mask.sum())
+    if num_blank > 0:
+        raise ValueError(
+            f"Existem {num_blank} registro(s) com 'Paciente' vazio. "
+            "Preencha todos os nomes antes de salvar."
         )
-        if downloaded and not st.session_state.db_downloaded_shown:
-            st.success("Banco baixado do GitHub.")
-            st.session_state.db_downloaded_shown = True
-        elif not downloaded and not st.session_state.db_downloaded_shown:
-            st.info("Banco não encontrado no GitHub (primeiro uso). Será criado localmente ao salvar.")
-            st.session_state.db_downloaded_shown = True
-    except Exception as e:
-        st.warning("Não foi possível baixar o banco do GitHub. Verifique token/permissões em st.secrets.")
-        st.exception(e)
 
-# Garante permissão de escrita no DB (após download)
-_ensure_writable(DB_PATH)
+    engine = get_engine()
+    with engine.begin() as conn:
+        for _, row in df.iterrows():
+            conn.execute(text("""
+                INSERT OR REPLACE INTO pacientes_unicos_por_dia_prestador
+                (Hospital, Ano, Mes, Dia, Data, Atendimento, Paciente, Aviso, Convenio, Prestador, Quarto)
+                VALUES (:Hospital, :Ano, :Mes, :Dia, :Data, :Atendimento, :Paciente, :Aviso, :Convenio, :Prestador, :Quarto)
+            """), {
+                "Hospital":    _safe_str(row.get("Hospital", "")),
+                "Ano":         _safe_int(row.get("Ano", 0)),
+                "Mes":         _safe_int(row.get("Mes", 0)),
+                "Dia":         _safe_int(row.get("Dia", 0)),
+                "Data":        _safe_str(row.get("Data", "")),
+                "Atendimento": _safe_str(row.get("Atendimento", "")),
+                "Paciente":    _safe_str(row.get("Paciente", "")),
+                "Aviso":       _safe_str(row.get("Aviso", "")),
+                "Convenio":    _safe_str(row.get("Convenio", "")),
+                "Prestador":   _safe_str(row.get("Prestador", "")),
+                "Quarto":      _safe_str(row.get("Quarto", "")),
+            })
 
-# Inicializa DB (cria tabela/índices se necessário)
-init_db()
 
-# --- Patch 1: Auto-sync de Autorizações uma vez por sessão ---
-try:
-    if not st.session_state.aut_sync_done:
-        total_aut = count_autorizacoes()
-        total_pac = count_all()
-        if (total_pac > 0) and (total_aut == 0):
-            novos, atualizados = sync_autorizacoes_from_pacientes(default_status="EM ANDAMENTO")
-            st.session_state.aut_sync_done = True
-            if novos or atualizados:
-                st.info(f"Autorizações sincronizadas automaticamente: novos={novos}, atualizados={atualizados}.")
+def read_all():
+    engine = get_engine()
+    with engine.connect() as conn:
+        rs = conn.execute(text("""
+            SELECT Hospital, Ano, Mes, Dia, Data, Atendimento, Paciente, Aviso, Convenio, Prestador, Quarto
+            FROM pacientes_unicos_por_dia_prestador
+            ORDER BY Hospital, Ano, Mes, Dia, Paciente, Prestador
+        """))
+        rows = rs.fetchall()
+    return rows
+
+
+def read_by_hospital(hospital: str):
+    engine = get_engine()
+    with engine.connect() as conn:
+        rs = conn.execute(text("""
+            SELECT Hospital, Ano, Mes, Dia, Data, Atendimento, Paciente, Aviso, Convenio, Prestador, Quarto
+            FROM pacientes_unicos_por_dia_prestador
+            WHERE Hospital = :h
+            ORDER BY Ano, Mes, Dia, Paciente, Prestador
+        """), {"h": hospital})
+        return rs.fetchall()
+
+
+def read_by_hospital_period(hospital: str, ano: Optional[int] = None, mes: Optional[int] = None):
+    engine = get_engine()
+    where = ["Hospital = :h"]
+    params = {"h": hospital}
+    if ano is not None:
+        where.append("Ano = :a"); params["a"] = int(ano)
+    if mes is not None:
+        where.append("Mes = :m"); params["m"] = int(mes)
+    sql = f"""
+        SELECT Hospital, Ano, Mes, Dia, Data, Atendimento, Paciente, Aviso, Convenio, Prestador, Quarto
+        FROM pacientes_unicos_por_dia_prestador
+        WHERE {' AND '.join(where)}
+        ORDER BY Ano, Mes, Dia, Paciente, Prestador
+    """
+    with engine.connect() as conn:
+        rs = conn.execute(text(sql), params)
+        return rs.fetchall()
+
+
+def delete_all():
+    engine = get_engine()
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM pacientes_unicos_por_dia_prestador"))
+
+
+def count_all():
+    engine = get_engine()
+    with engine.connect() as conn:
+        rs = conn.execute(text("SELECT COUNT(1) FROM pacientes_unicos_por_dia_prestador"))
+        return rs.scalar_one()
+
+
+# ---------------- Catálogos (Tipos / Situações) ----------------
+
+def upsert_procedimento_tipo(nome: str, ativo: int = 1, ordem: int = 0) -> int:
+    """
+    Cria ou atualiza (por nome único). Retorna id.
+    """
+    engine = get_engine()
+    with engine.begin() as conn:
+        # tenta pegar existente
+        rs = conn.execute(text("SELECT id FROM procedimento_tipos WHERE nome = :n"), {"n": nome.strip()})
+        row = rs.fetchone()
+        if row:
+            conn.execute(text("""
+                UPDATE procedimento_tipos SET ativo = :a, ordem = :o WHERE id = :id
+            """), {"a": int(ativo), "o": int(ordem), "id": row[0]})
+            return int(row[0])
         else:
-            st.session_state.aut_sync_done = True
-except Exception as e:
-    st.warning("Não foi possível realizar a auto-sincronização das autorizações nesta sessão.")
-    st.exception(e)
-
-# ---------------- Navegação por Abas ----------------
-tab_pacientes, tab_autorizacoes = st.tabs(["📋 Pacientes", "✅ Autorizações"])
+            rs2 = conn.execute(text("""
+                INSERT INTO procedimento_tipos (nome, ativo, ordem) VALUES (:n, :a, :o)
+            """), {"n": nome.strip(), "a": int(ativo), "o": int(ordem)})
+            return int(rs2.lastrowid)
 
 
-# ======================================================================================
-# ABA 1: 📋 Pacientes
-# ======================================================================================
-with tab_pacientes:
-    st.subheader("Prestadores alvo")
-    prestadores_default = ["JOSE.ADORNO", "CASSIO CESAR", "FERNANDO AND", "SIMAO.MATOS"]
-    prestadores_text = st.text_area(
-        "Informe os prestadores (um por linha)",
-        value="\n".join(prestadores_default),
-        height=120,
-        help="A lista é usada para filtrar os registros. A comparação é case-insensitive."
-    )
-    prestadores_lista = [p.strip() for p in prestadores_text.splitlines() if p.strip()]
-
-    # Hospital do arquivo
-    st.subheader("Hospital deste arquivo")
-    hospital_opcoes = [
-        "Hospital Santa Lucia Sul",
-        "Hospital Santa Lucia Norte",
-        "Hospital Maria Auxiliadora",
-    ]
-    selected_hospital = st.selectbox(
-        "Selecione o Hospital referente à planilha enviada",
-        options=hospital_opcoes,
-        index=0,
-        help="O hospital selecionado será aplicado a todas as linhas processadas deste arquivo."
-    )
-
-    # Upload
-    st.subheader("Upload de planilha (CSV ou Excel)")
-    uploaded_file = st.file_uploader(
-        "Escolha o arquivo",
-        type=["csv", "xlsx", "xls"],
-        help="Aceita CSV 'bruto' (sem cabeçalho padronizado) ou planilhas estruturadas.",
-        key="uploader_pacientes"
-    )
-
-    # Estado
-    if "df_final" not in st.session_state:
-        st.session_state.df_final = None
-    if "last_upload_id" not in st.session_state:
-        st.session_state.last_upload_id = None
-    if "editor_key" not in st.session_state:
-        st.session_state.editor_key = "editor_pacientes_initial"
-
-    def _make_upload_id(file, hospital: str) -> str:
-        name = getattr(file, "name", "sem_nome")
-        size = getattr(file, "size", 0)
-        return f"{name}-{size}-{hospital.strip()}"
-
-    # Reset
-    col_reset1, col_reset2 = st.columns(2)
-    with col_reset1:
-        if st.button("🧹 Limpar tabela / reset", key="btn_reset_pacientes"):
-            st.session_state.df_final = None
-            st.session_state.last_upload_id = None
-            st.session_state.editor_key = "editor_pacientes_reset"
-            st.success("Tabela limpa. Faça novo upload para reprocessar.")
-
-    # Processamento
-    if uploaded_file is not None:
-        current_upload_id = _make_upload_id(uploaded_file, selected_hospital)
-        if st.session_state.last_upload_id != current_upload_id:
-            st.session_state.df_final = None
-            st.session_state.editor_key = f"editor_pacientes_{current_upload_id}"
-            st.session_state.last_upload_id = current_upload_id
-
-        with st.spinner("Processando arquivo com a lógica consolidada..."):
-            try:
-                df_final = process_uploaded_file(uploaded_file, prestadores_lista, selected_hospital.strip())
-                if df_final is None or len(df_final) == 0:
-                    st.warning("Nenhuma linha após processamento. Verifique a lista de prestadores e o conteúdo do arquivo.")
-                    st.session_state.df_final = None
-                else:
-                    st.session_state.df_final = df_final
-            except Exception as e:
-                st.error("Falha ao processar o arquivo. Verifique o formato da planilha/CSV.")
-                st.exception(e)
-
-    # Edição e persistência
-    if isinstance(st.session_state.df_final, pd.DataFrame) and not st.session_state.df_final.empty:
-        st.success(f"Processamento concluído! Linhas: {len(st.session_state.df_final)}")
-
-        st.subheader("Revisar e editar nomes de Paciente (opcional)")
-        st.caption("Edite apenas a coluna 'Paciente'. As demais ficam bloqueadas para evitar alterações acidentais.")
-
-        df_to_edit = st.session_state.df_final.sort_values(
-            ["Hospital", "Ano", "Mes", "Dia", "Paciente", "Prestador"]
-        ).reset_index(drop=True)
-
-        edited_df = st.data_editor(
-            df_to_edit,
-            use_container_width=True,
-            num_rows="fixed",
-            column_config={
-                "Hospital":   st.column_config.TextColumn(disabled=True),
-                "Ano":        st.column_config.NumberColumn(disabled=True),
-                "Mes":        st.column_config.NumberColumn(disabled=True),
-                "Dia":        st.column_config.NumberColumn(disabled=True),
-                "Data":       st.column_config.TextColumn(disabled=True),
-                "Atendimento":st.column_config.TextColumn(disabled=True),
-                "Aviso":      st.column_config.TextColumn(disabled=True),
-                "Convenio":   st.column_config.TextColumn(disabled=True),
-                "Prestador":  st.column_config.TextColumn(disabled=True),
-                "Quarto":     st.column_config.TextColumn(disabled=True),
-                "Paciente":   st.column_config.TextColumn(help="Clique para editar o nome do paciente."),
-            },
-            hide_index=True,
-            key=st.session_state.editor_key
-        )
-
-        st.session_state.df_final = edited_df
-
-        st.subheader("Persistência")
-        if st.button("Salvar no banco (exemplo.db)", key="btn_salvar_pacientes"):
-            try:
-                upsert_dataframe(st.session_state.df_final)
-                total = count_all()
-                st.success(f"Dados salvos com sucesso em exemplo.db. Total de linhas no banco: {total}")
-
-                # Commit GitHub
-                if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
-                    try:
-                        ok = upload_db_to_github(
-                            owner=GH_OWNER,
-                            repo=GH_REPO,
-                            path_in_repo=GH_PATH_IN_REPO,
-                            branch=GH_BRANCH,
-                            local_db_path=DB_PATH,
-                            commit_message="Atualiza banco SQLite via app (salvar no banco)"
-                        )
-                        if ok:
-                            st.success("Sincronização automática com GitHub concluída.")
-                    except Exception as e:
-                        st.error("Falha ao sincronizar com GitHub (commit automático).")
-                        st.exception(e)
-
-                st.session_state.df_final = None
-                st.session_state.editor_key = "editor_pacientes_after_save"
-
-            except Exception as e:
-                st.error("Falha ao salvar no banco. Veja detalhes abaixo:")
-                st.exception(e)
-
-        # Export por hospital (apenas se DF válido)
-        st.subheader("Exportar Excel (multi-aba por Hospital)")
-        if isinstance(st.session_state.df_final, pd.DataFrame) and not st.session_state.df_final.empty:
-            excel_bytes = to_formatted_excel_by_hospital(st.session_state.df_final)
-            st.download_button(
-                label="Baixar Excel por Hospital",
-                data=excel_bytes,
-                file_name="Pacientes_por_dia_prestador_hospital.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="dl_pacientes_excel"
-            )
-    else:
-        st.info("Nenhum dado processado para exportar. Faça o upload e processe a planilha.")
-
-    # Conteúdo atual
-    st.divider()
-    st.subheader("Conteúdo atual do banco (exemplo.db)")
-    rows = read_all()
-    if rows:
-        cols = ["Hospital","Ano","Mes","Dia","Data","Atendimento","Paciente","Aviso","Convenio","Prestador","Quarto"]
-        db_df = pd.DataFrame(rows, columns=cols)
-        st.dataframe(
-            db_df.sort_values(["Hospital","Ano","Mes","Dia","Paciente","Prestador"]),
-            use_container_width=True
-        )
-
-        if not db_df.empty:
-            st.subheader("Exportar Excel por Hospital (dados do banco)")
-            excel_bytes_db = to_formatted_excel_by_hospital(db_df)
-            st.download_button(
-                label="Baixar Excel (Banco)",
-                data=excel_bytes_db,
-                file_name="Pacientes_por_dia_prestador_hospital_banco.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="dl_pacientes_excel_banco"
-            )
-    else:
-        st.info("Banco ainda sem dados. Faça o upload e clique em 'Salvar no banco'.")
+def list_procedimento_tipos(only_active: bool = True):
+    engine = get_engine()
+    with engine.connect() as conn:
+        if only_active:
+            rs = conn.execute(text("SELECT id, nome, ativo, ordem FROM procedimento_tipos WHERE ativo = 1 ORDER BY ordem, nome"))
+        else:
+            rs = conn.execute(text("SELECT id, nome, ativo, ordem FROM procedimento_tipos ORDER BY ativo DESC, ordem, nome"))
+        return rs.fetchall()
 
 
-# ======================================================================================
-# ABA 2: ✅ Autorizações (sem upload; sincroniza a partir dos pacientes)
-# ======================================================================================
-with tab_autorizacoes:
-    st.subheader("Controle de Autorizações (a partir dos pacientes do banco)")
-    st.caption("Clique em 'Sincronizar com pacientes do banco' para espelhar autorizações. Depois edite Observações/Status/Guias/Fatura e salve.")
+def set_procedimento_tipo_status(id_: int, ativo: int):
+    engine = get_engine()
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE procedimento_tipos SET ativo = :a WHERE id = :id"), {"a": int(ativo), "id": int(id_)})
 
-    # --- Patch 2: Auto-sync (fallback na abertura da aba, uma vez por sessão) ---
-    try:
-        total_aut = count_autorizacoes()
-        total_pac = count_all()
-        if (total_aut == 0) and (total_pac > 0) and not st.session_state.aut_sync_done_in_tab:
-            novos, atualizados = sync_autorizacoes_from_pacientes(default_status="EM ANDAMENTO")
-            st.session_state.aut_sync_done_in_tab = True
-            if novos or atualizados:
-                st.success(f"Autorizações sincronizadas automaticamente na abertura da aba: novos={novos}, atualizados={atualizados}.")
-    except Exception as e:
-        st.warning("Auto-sincronização na aba falhou.")
-        st.exception(e)
 
-    # Sincronização pai/equipe (manual)
-    col_sync1, col_sync2, col_sync3 = st.columns(3)
-    with col_sync1:
-        if st.button("🔄 Sincronizar com pacientes do banco", help="Cria/atualiza autorizações (ATT ou FALLBACK: Paciente+Data+Unidade)."):
-            try:
-                novos, atualizados = sync_autorizacoes_from_pacientes(default_status="EM ANDAMENTO")
-                st.success(f"Sincronização concluída. Novos: {novos} | Atualizados: {atualizados}")
-            except Exception as e:
-                st.error("Falha ao sincronizar autorizações a partir dos pacientes.")
-                st.exception(e)
+def upsert_cirurgia_situacao(nome: str, ativo: int = 1, ordem: int = 0) -> int:
+    engine = get_engine()
+    with engine.begin() as conn:
+        rs = conn.execute(text("SELECT id FROM cirurgia_situacoes WHERE nome = :n"), {"n": nome.strip()})
+        row = rs.fetchone()
+        if row:
+            conn.execute(text("""
+                UPDATE cirurgia_situacoes SET ativo = :a, ordem = :o WHERE id = :id
+            """), {"a": int(ativo), "o": int(ordem), "id": row[0]})
+            return int(row[0])
+        else:
+            rs2 = conn.execute(text("""
+                INSERT INTO cirurgia_situacoes (nome, ativo, ordem) VALUES (:n, :a, :o)
+            """), {"n": nome.strip(), "a": int(ativo), "o": int(ordem)})
+            return int(rs2.lastrowid)
 
-    with col_sync2:
-        if st.button("📥 Recarregar autorizações do banco"):
-            st.experimental_rerun()
 
-    with col_sync3:
-        if st.button("👥 Sincronizar equipes (a partir dos pacientes)", help="Inclui prestadores candidatos na equipe de cada autorização. Não define papel/participação."):
-            try:
-                novos_eq, afetadas = sync_equipes_from_pacientes()
-                st.success(f"Equipes sincronizadas. Novas linhas: {novos_eq} | Autorizações afetadas: {afetadas}")
-            except Exception as e:
-                st.error("Falha ao sincronizar equipes.")
-                st.exception(e)
+def list_cirurgia_situacoes(only_active: bool = True):
+    engine = get_engine()
+    with engine.connect() as conn:
+        if only_active:
+            rs = conn.execute(text("SELECT id, nome, ativo, ordem FROM cirurgia_situacoes WHERE ativo = 1 ORDER BY ordem, nome"))
+        else:
+            rs = conn.execute(text("SELECT id, nome, ativo, ordem FROM cirurgia_situacoes ORDER BY ativo DESC, ordem, nome"))
+        return rs.fetchall()
 
-    # Grid principal de autorizações (sem NK)
-    rows_aut = read_autorizacoes(include_nk=False)
-    if rows_aut:
-        cols_aut = [
-            "Unidade","Atendimento","Paciente","Profissional","Data_Cirurgia","Convenio","Tipo_Procedimento",
-            "Observacoes","Guia_AMHPTISS","Guia_AMHPTISS_Complemento","Fatura","Status","UltimaAtualizacao"
-        ]
-        df_aut_db = pd.DataFrame(rows_aut, columns=cols_aut)
 
-        # Filtros
-        st.subheader("Filtros")
-        colf1, colf2, colf3, colf4 = st.columns(4)
-        with colf1:
-            status_sel = st.multiselect("Status", sorted(df_aut_db["Status"].dropna().unique().tolist()))
-        with colf2:
-            conv_sel = st.multiselect("Convênio", sorted(df_aut_db["Convenio"].dropna().unique().tolist()))
-        with colf3:
-            unid_sel = st.multiselect("Unidade (Hospital)", sorted(df_aut_db["Unidade"].dropna().unique().tolist()))
-        with colf4:
-            prest_sel = st.multiselect("Profissional (principal)", sorted(df_aut_db["Profissional"].dropna().unique().tolist()))
+def set_cirurgia_situacao_status(id_: int, ativo: int):
+    engine = get_engine()
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE cirurgia_situacoes SET ativo = :a WHERE id = :id"), {"a": int(ativo), "id": int(id_)})
 
-        def _apply_filters(df: pd.DataFrame) -> pd.DataFrame:
-            out = df.copy()
-            if status_sel:
-                out = out[out["Status"].isin(status_sel)]
-            if conv_sel:
-                out = out[out["Convenio"].isin(conv_sel)]
-            if unid_sel:
-                out = out[out["Unidade"].isin(unid_sel)]
-            if prest_sel:
-                out = out[out["Profissional"].isin(prest_sel)]
-            return out
 
-        df_filtered = _apply_filters(df_aut_db)
+# ---------------- Cirurgias (CRUD) ----------------
 
-        # Editor principal
-        st.subheader("Revisar e editar (Observações / Status / Guias / Fatura)")
-        st.caption("Os campos espelhados dos pacientes (Unidade, Paciente, Profissional, Data_Cirurgia, Convênio) são atualizados pela sincronização e ficam bloqueados.")
+def insert_or_update_cirurgia(payload: Dict[str, Any]) -> int:
+    """
+    UPSERT por (Hospital, Atendimento, Prestador, Data_Cirurgia).
+    Retorna id da cirurgia.
+    """
+    engine = get_engine()
+    with engine.begin() as conn:
+        # Tenta achar existente (segue a unique key)
+        rs = conn.execute(text("""
+            SELECT id FROM cirurgias
+            WHERE Hospital = :h AND Atendimento = :att AND Prestador = :p AND Data_Cirurgia = :d
+        """), {
+            "h": _safe_str(payload.get("Hospital")),
+            "att": _safe_str(payload.get("Atendimento")),
+            "p": _safe_str(payload.get("Prestador")),
+            "d": _safe_str(payload.get("Data_Cirurgia"))
+        })
+        row = rs.fetchone()
 
-        edited_aut = st.data_editor(
-            df_filtered.sort_values(["Status","Convenio","Paciente"], kind="mergesort").reset_index(drop=True),
-            use_container_width=True,
-            num_rows="fixed",
-            hide_index=True,
-            column_config={
-                "Unidade":           st.column_config.TextColumn(disabled=True),
-                "Atendimento":       st.column_config.TextColumn(disabled=False),
-                "Paciente":          st.column_config.TextColumn(disabled=True),
-                "Profissional":      st.column_config.TextColumn(disabled=True),
-                "Data_Cirurgia":     st.column_config.TextColumn(disabled=True),
-                "Convenio":          st.column_config.TextColumn(disabled=True),
-                "Tipo_Procedimento": st.column_config.TextColumn(disabled=True),
-                "Observacoes":       st.column_config.TextColumn(help="Edite o texto da observação."),
-                "Guia_AMHPTISS":     st.column_config.TextColumn(),
-                "Guia_AMHPTISS_Complemento": st.column_config.TextColumn(),
-                "Fatura":            st.column_config.TextColumn(),
-                "Status":            st.column_config.SelectboxColumn(options=[
-                    "PRONTO","NÃO COBRAR","AGUARDAR FILIAL","A DIGITAR","AGUARDAR PARAMETRIZAÇÃO","PENDENTE AUTORIZAÇÃO","EM ANDAMENTO"
-                ], help="Ajuste manual, se necessário."),
-                "UltimaAtualizacao": st.column_config.TextColumn(disabled=True),
-            },
-            key="editor_autorizacoes"
-        )
+        params = {
+            "Hospital": _safe_str(payload.get("Hospital")),
+            "Atendimento": _safe_str(payload.get("Atendimento")),
+            "Paciente": _safe_str(payload.get("Paciente")),
+            "Prestador": _safe_str(payload.get("Prestador")),
+            "Data_Cirurgia": _safe_str(payload.get("Data_Cirurgia")),
+            "Convenio": _safe_str(payload.get("Convenio")),
+            "Procedimento_Tipo_ID": payload.get("Procedimento_Tipo_ID"),
+            "Situacao_ID": payload.get("Situacao_ID"),
+            "Guia_AMHPTISS": _safe_str(payload.get("Guia_AMHPTISS")),
+            "Guia_AMHPTISS_Complemento": _safe_str(payload.get("Guia_AMHPTISS_Complemento")),
+            "Fatura": _safe_str(payload.get("Fatura")),
+            "Observacoes": _safe_str(payload.get("Observacoes")),
+        }
 
-        # Métricas por Status
-        st.subheader("Métricas por Status")
-        m_counts = edited_aut["Status"].value_counts(dropna=False).sort_index()
-        ncols = min(6, max(1, len(m_counts)))
-        cols_m = st.columns(ncols)
-        for i, (status_name, qnt) in enumerate(m_counts.items()):
-            with cols_m[i % ncols]:
-                st.metric(label=status_name, value=int(qnt))
-
-        # Persistência + GitHub
-        st.subheader("Persistência (Autorizações)")
-        if st.button("Salvar autorizações no banco", key="btn_salvar_aut"):
-            try:
-                upsert_autorizacoes(edited_aut)
-                total_aut = count_autorizacoes()
-                st.success(f"Autorizações salvas. Total de linhas na tabela: {total_aut}")
-
-                if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
-                    try:
-                        ok = upload_db_to_github(
-                            owner=GH_OWNER,
-                            repo=GH_REPO,
-                            path_in_repo=GH_PATH_IN_REPO,
-                            branch=GH_BRANCH,
-                            local_db_path=DB_PATH,
-                            commit_message="Atualiza tabela de autorizações via app (sincronizada de pacientes)"
-                        )
-                        if ok:
-                            st.success("Sincronização automática com GitHub concluída.")
-                    except Exception as e:
-                        st.error("Falha ao sincronizar com GitHub (autorizações).")
-                        st.exception(e)
-
-            except Exception as e:
-                st.error("Falha ao salvar autorizações.")
-                st.exception(e)
-
-        # Export por Status
-        st.subheader("Exportar Excel por Status")
-        excel_aut = to_formatted_excel_by_status(edited_aut)
-        st.download_button(
-            label="Baixar Excel (Autorizações por Status)",
-            data=excel_aut,
-            file_name="Autorizacoes_por_status.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="dl_autorizacoes_excel"
-        )
-
-        # Conciliação
-        st.subheader("Conciliação com banco (por Número do Atendimento)")
-        if st.toggle("Mostrar conciliação", key="toggle_join_aut"):
-            try:
-                joined = join_aut_por_atendimento()
-                if joined:
-                    cols_join = [
-                        "Unidade","Atendimento","PacienteAut","ProfAut","Data_Cirurgia","Convenio","Status",
-                        "Hospital","Data","PacienteDB","PrestDB"
-                    ]
-                    df_join = pd.DataFrame(joined, columns=cols_join)
-                    df_join["Match"] = df_join["PacienteDB"].notna()
-                    st.dataframe(df_join, use_container_width=True)
-                    st.caption("Use filtros para localizar divergências. Ajuste 'Atendimento' nas autorizações quando necessário.")
-                else:
-                    st.info("Sem dados para conciliar ainda. Salve e/ou sincronize.")
-            except Exception as e:
-                st.error("Falha ao gerar conciliação.")
-                st.exception(e)
-
-        # ---------------- Equipe Cirúrgica (filha) ----------------
-        st.subheader("Equipe Cirúrgica por Autorização")
-
-        # Seleção de autorização por NK
-        rows_aut_nk = read_autorizacoes(include_nk=True)
-        if rows_aut_nk:
-            cols_aut_nk = [
-                "Unidade","Atendimento","Paciente","Profissional","Data_Cirurgia","Convenio","Tipo_Procedimento",
-                "Observacoes","Guia_AMHPTISS","Guia_AMHPTISS_Complemento","Fatura","Status","UltimaAtualizacao","NaturalKey"
-            ]
-            df_aut_nk = pd.DataFrame(rows_aut_nk, columns=cols_aut_nk)
-
-            def _label_row(r: pd.Series) -> str:
-                att = str(r["Atendimento"]).strip()
-                base = f"{r['Paciente']} — {r['Data_Cirurgia']} — {r['Unidade']}"
-                return f"{base} (ATT:{att})" if att else base
-
-            opts = df_aut_nk.apply(_label_row, axis=1).tolist()
-            selected = st.selectbox(
-                "Selecione a autorização para editar a equipe",
-                options=opts,
-                index=0,
-                key="sel_aut_equipe"
-            )
-            sel_row = df_aut_nk.iloc[opts.index(selected)]
-            sel_nk = sel_row["NaturalKey"]
-
-            # Carrega equipe atual
-            equipe_rows = read_equipes(sel_nk)
-            df_equipe = pd.DataFrame(
-                equipe_rows,
-                columns=["NaturalKey","Prestador","Papel","Participacao","Observacao"]
-            )
-            if df_equipe.empty:
-                df_equipe = pd.DataFrame(
-                    columns=["NaturalKey","Prestador","Papel","Participacao","Observacao"]
+        if row:
+            conn.execute(text("""
+                UPDATE cirurgias SET
+                    Paciente = :Paciente,
+                    Convenio = :Convenio,
+                    Procedimento_Tipo_ID = :Procedimento_Tipo_ID,
+                    Situacao_ID = :Situacao_ID,
+                    Guia_AMHPTISS = :Guia_AMHPTISS,
+                    Guia_AMHPTISS_Complemento = :Guia_AMHPTISS_Complemento,
+                    Fatura = :Fatura,
+                    Observacoes = :Observacoes,
+                    updated_at = datetime('now')
+                WHERE id = :id
+            """), {**params, "id": int(row[0])})
+            return int(row[0])
+        else:
+            rs2 = conn.execute(text("""
+                INSERT INTO cirurgias (
+                    Hospital, Atendimento, Paciente, Prestador, Data_Cirurgia,
+                    Convenio, Procedimento_Tipo_ID, Situacao_ID,
+                    Guia_AMHPTISS, Guia_AMHPTISS_Complemento, Fatura, Observacoes
+                ) VALUES (
+                    :Hospital, :Atendimento, :Paciente, :Prestador, :Data_Cirurgia,
+                    :Convenio, :Procedimento_Tipo_ID, :Situacao_ID,
+                    :Guia_AMHPTISS, :Guia_AMHPTISS_Complemento, :Fatura, :Observacoes
                 )
-            df_equipe["NaturalKey"] = sel_nk  # garante NK
+            """), params)
+            return int(rs2.lastrowid)
 
-            st.caption("Prestadores candidatos (extraídos do módulo Pacientes para esta autorização):")
-            try:
-                candidatos = distinct_prestadores_for_auth(sel_nk)
-                st.write(", ".join(candidatos) if candidatos else "—")
-            except Exception:
-                st.write("—")
 
-            edited_team = st.data_editor(
-                df_equipe,
-                use_container_width=True,
-                num_rows="dynamic",
-                hide_index=True,
-                column_config={
-                    "NaturalKey": st.column_config.TextColumn(disabled=True),
-                    "Prestador":  st.column_config.TextColumn(help="Nome do profissional."),
-                    "Papel":      st.column_config.SelectboxColumn(
-                        options=[
-                            "", "Cirurgião", "Auxiliar I", "Auxiliar II", "Auxiliar III",
-                            "Anestesista", "Instrumentador", "Endoscopista", "Visitante/Parecer"
-                        ],
-                        help="Função na equipe."
-                    ),
-                    "Participacao": st.column_config.TextColumn(
-                        help="Percentual ou descrição (ex.: 70%, 'Responsável')."
-                    ),
-                    "Observacao":   st.column_config.TextColumn(help="Comentário livre."),
-                },
-                key=f"editor_equipe_{sel_nk}"
-            )
+def list_cirurgias(
+    hospital: Optional[str] = None,
+    ano_mes: Optional[str] = None,  # "YYYY-MM" ou "MM/YYYY" se Data_Cirurgia no seu formato
+    prestador: Optional[str] = None
+):
+    """
+    Lista com filtros simples. Como Data_Cirurgia é TEXT livre, o filtro de ano_mes
+    faz um LIKE na string. Ajuste conforme o padrão que você adotar.
+    """
+    engine = get_engine()
+    where = []
+    params = {}
+    if hospital:
+        where.append("Hospital = :h"); params["h"] = hospital
+    if prestador:
+        where.append("Prestador = :p"); params["p"] = prestador
+    if ano_mes:
+        where.append("Data_Cirurgia LIKE :dm"); params["dm"] = f"%{ano_mes}%"
 
-            if st.button("Salvar equipe desta autorização", key="btn_salvar_equipe"):
-                try:
-                    upsert_equipes(sel_nk, edited_team)
-                    st.success("Equipe salva com sucesso.")
-                except Exception as e:
-                    st.error("Falha ao salvar equipe.")
-                    st.exception(e)
-        else:
-            st.info("Não há autorizações cadastradas ainda. Sincronize com os pacientes do banco.")
+    sql = f"""
+        SELECT id, Hospital, Atendimento, Paciente, Prestador, Data_Cirurgia,
+               Convenio, Procedimento_Tipo_ID, Situacao_ID,
+               Guia_AMHPTISS, Guia_AMHPTISS_Complemento, Fatura,
+               Observacoes, created_at, updated_at
+        FROM cirurgias
+        {('WHERE ' + ' AND '.join(where)) if where else ''}
+        ORDER BY Hospital, Data_Cirurgia, Paciente
+    """
+    with engine.connect() as conn:
+        rs = conn.execute(text(sql), params)
+        return rs.fetchall()
 
-        # ---------------- Export completo: Autorizações + Equipes ----------------
-        st.subheader("Exportar Autorizações + Equipes (completo)")
-        # Autorizações com NK
-        rows_aut_nk_all = read_autorizacoes(include_nk=True)
-        auth_cols = [
-            "Unidade","Atendimento","Paciente","Profissional","Data_Cirurgia","Convenio","Tipo_Procedimento",
-            "Observacoes","Guia_AMHPTISS","Guia_AMHPTISS_Complemento","Fatura","Status","UltimaAtualizacao","NaturalKey"
-        ]
-        auth_df = pd.DataFrame(rows_aut_nk_all, columns=auth_cols)
 
-        # Equipes de todas as autorizações
-        team_rows_all = []
-        if not auth_df.empty and "NaturalKey" in auth_df.columns:
-            for nk in auth_df["NaturalKey"].dropna().astype(str).unique():
-                rows_eq = read_equipes(nk)
-                if rows_eq:
-                    team_rows_all.extend(rows_eq)
+def delete_cirurgia(id_: int):
+    engine = get_engine()
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM cirurgias WHERE id = :id"), {"id": int(id_)})
 
-        team_df = pd.DataFrame(
-            team_rows_all,
-            columns=["NaturalKey","Prestador","Papel","Participacao","Observacao"]
-        )
 
-        per_auth_tabs = st.toggle(
-            "Criar aba por autorização (pode criar muitas abas)",
-            value=False,
-            key="toggle_tabs_per_auth"
-        )
+# ------- Helper para pré-preenchimento a partir da tabela original -------
 
-        excel_full = to_formatted_excel_authorizations_with_team(
-            auth_df=auth_df,
-            team_df=team_df,
-            per_authorization_tabs=per_auth_tabs
-        )
-        st.download_button(
-            label="Baixar Excel completo (Autorizações + Equipes)",
-            data=excel_full,
-            file_name="Autorizacoes_Equipes_Completo.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="dl_aut_and_team"
-        )
-    else:
-        st.info("Sincronize com os pacientes do banco para iniciar o acompanhamento.")
+def find_registros_para_prefill(hospital: str, ano: Optional[int] = None, mes: Optional[int] = None, prestadores: Optional[List[str]] = None):
+    """
+    Retorna registros da tabela original para servir de base na criação de cirurgias.
+    Filtros: hospital, (opcionais) ano, mes, prestadores exatos (case-sensitive aqui).
+    """
+    engine = get_engine()
+    where = ["Hospital = :h"]
+    params = {"h": hospital}
+    if ano is not None:
+        where.append("Ano = :a"); params["a"] = int(ano)
+    if mes is not None:
+        where.append("Mes = :m"); params["m"] = int(mes)
+    if prestadores and len(prestadores) > 0:
+        # Monta IN dinâmico
+        in_list = ", ".join([f":p{i}" for i in range(len(prestadores))])
+        where.append(f"Prestador IN ({in_list})")
+        for i, p in enumerate(prestadores):
+            params[f"p{i}"] = p
+
+    sql = f"""
+        SELECT Hospital, Data, Atendimento, Paciente, Convenio, Prestador
+        FROM pacientes_unicos_por_dia_prestador
+        WHERE {' AND '.join(where)}
+        ORDER BY Ano, Mes, Dia, Paciente, Prestador
+    """
+    with engine.connect() as conn:
+        rs = conn.execute(text(sql), params)
+        return rs.fetchall()
