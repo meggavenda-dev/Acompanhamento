@@ -209,7 +209,7 @@ with tab_pacientes:
                 st.exception(e)
 
     # Edição e persistência
-    if st.session_state.df_final is not None and len(st.session_state.df_final) > 0:
+    if isinstance(st.session_state.df_final, pd.DataFrame) and not st.session_state.df_final.empty:
         st.success(f"Processamento concluído! Linhas: {len(st.session_state.df_final)}")
 
         st.subheader("Revisar e editar nomes de Paciente (opcional)")
@@ -273,15 +273,19 @@ with tab_pacientes:
                 st.error("Falha ao salvar no banco. Veja detalhes abaixo:")
                 st.exception(e)
 
+        # Export por hospital (apenas se DF válido)
         st.subheader("Exportar Excel (multi-aba por Hospital)")
-        excel_bytes = to_formatted_excel_by_hospital(st.session_state.df_final)
-        st.download_button(
-            label="Baixar Excel por Hospital",
-            data=excel_bytes,
-            file_name="Pacientes_por_dia_prestador_hospital.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="dl_pacientes_excel"
-        )
+        if isinstance(st.session_state.df_final, pd.DataFrame) and not st.session_state.df_final.empty:
+            excel_bytes = to_formatted_excel_by_hospital(st.session_state.df_final)
+            st.download_button(
+                label="Baixar Excel por Hospital",
+                data=excel_bytes,
+                file_name="Pacientes_por_dia_prestador_hospital.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="dl_pacientes_excel"
+            )
+    else:
+        st.info("Nenhum dado processado para exportar. Faça o upload e processe a planilha.")
 
     # Conteúdo atual
     st.divider()
@@ -295,15 +299,16 @@ with tab_pacientes:
             use_container_width=True
         )
 
-        st.subheader("Exportar Excel por Hospital (dados do banco)")
-        excel_bytes_db = to_formatted_excel_by_hospital(db_df)
-        st.download_button(
-            label="Baixar Excel (Banco)",
-            data=excel_bytes_db,
-            file_name="Pacientes_por_dia_prestador_hospital_banco.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="dl_pacientes_excel_banco"
-        )
+        if not db_df.empty:
+            st.subheader("Exportar Excel por Hospital (dados do banco)")
+            excel_bytes_db = to_formatted_excel_by_hospital(db_df)
+            st.download_button(
+                label="Baixar Excel (Banco)",
+                data=excel_bytes_db,
+                file_name="Pacientes_por_dia_prestador_hospital_banco.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="dl_pacientes_excel_banco"
+            )
     else:
         st.info("Banco ainda sem dados. Faça o upload e clique em 'Salvar no banco'.")
 
@@ -511,60 +516,3 @@ with tab_autorizacoes:
                 df_equipe,
                 use_container_width=True,
                 num_rows="dynamic",
-                hide_index=True,
-                column_config={
-                    "NaturalKey":   st.column_config.TextColumn(disabled=True),
-                    "Prestador":    st.column_config.TextColumn(help="Nome do profissional."),
-                    "Papel":        st.column_config.SelectboxColumn(options=[
-                        "", "Cirurgião","Auxiliar I","Auxiliar II","Auxiliar III",
-                        "Anestesista","Instrumentador","Endoscopista","Visitante/Parecer"
-                    ], help="Função na equipe."),
-                    "Participacao": st.column_config.TextColumn(help="Percentual ou descrição (ex.: 70%, 'Responsável')."),
-                    "Observacao":   st.column_config.TextColumn(help="Comentário livre."),
-                },
-                key=f"editor_equipe_{sel_nk}"
-            )
-
-            if st.button("Salvar equipe desta autorização", key="btn_salvar_equipe"):
-                try:
-                    upsert_equipes(sel_nk, edited_team)
-                    st.success("Equipe salva com sucesso.")
-                except Exception as e:
-                    st.error("Falha ao salvar equipe.")
-                    st.exception(e)
-        else:
-            st.info("Não há autorizações cadastradas ainda. Sincronize com os pacientes do banco.")
-
-        # ---------------- Export completo: Autorizações + Equipes ----------------
-        st.subheader("Exportar Autorizações + Equipes (completo)")
-        # Autorizações com NK
-        rows_aut_nk_all = read_autorizacoes(include_nk=True)
-        auth_cols = [
-            "Unidade","Atendimento","Paciente","Profissional","Data_Cirurgia","Convenio","Tipo_Procedimento",
-            "Observacoes","Guia_AMHPTISS","Guia_AMHPTISS_Complemento","Fatura","Status","UltimaAtualizacao","NaturalKey"
-        ]
-        auth_df = pd.DataFrame(rows_aut_nk_all, columns=auth_cols)
-
-        # Equipes de todas as autorizações
-        team_rows_all = []
-        for nk in auth_df["NaturalKey"].dropna().astype(str).unique():
-            for r in read_equipes(nk):
-                team_rows_all.append(r)
-        team_df = pd.DataFrame(team_rows_all, columns=["NaturalKey","Prestador","Papel","Participacao","Observacao"])
-
-        per_auth_tabs = st.toggle("Criar aba por autorização (pode criar muitas abas)", value=False, key="toggle_tabs_per_auth")
-
-        excel_full = to_formatted_excel_authorizations_with_team(
-            auth_df=auth_df,
-            team_df=team_df,
-            per_authorization_tabs=per_auth_tabs
-        )
-        st.download_button(
-            label="Baixar Excel completo (Autorizações + Equipes)",
-            data=excel_full,
-            file_name="Autorizacoes_Equipes_Completo.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="dl_aut_and_team"
-        )
-    else:
-        st.info("Sincronize com os pacientes do banco para iniciar o acompanhamento.")
