@@ -8,7 +8,6 @@ from typing import Optional, List, Dict, Any
 from sqlalchemy import create_engine, text
 
 # ---------------- Configuração de caminho persistente ----------------
-# Coloca o arquivo do banco dentro de ./data, com caminho absoluto, e garante a pasta.
 MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(MODULE_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -24,7 +23,6 @@ def get_engine():
     """
     global _ENGINE
     if _ENGINE is None:
-        # echo=False silencioso; future=True para SQLAlchemy 2.x
         _ENGINE = create_engine(DB_URI, future=True, echo=False)
     return _ENGINE
 
@@ -155,7 +153,6 @@ def _safe_int(val, default: int = 0) -> int:
         return default
     if isinstance(val, float):
         try:
-            # math.isnan só aceita float; se não for, ignora
             if math.isnan(val):
                 return default
         except Exception:
@@ -188,16 +185,10 @@ def _safe_str(val, default: str = "") -> str:
 def upsert_dataframe(df):
     """
     UPSERT (INSERT OR REPLACE) por (Data, Paciente, Prestador, Hospital).
-
-    GARANTIAS:
-    - ❌ Bloqueia salvamento se existir 'Paciente' vazio (None / '' / espaços)
-    - Converte tipos com segurança (int/str)
-    - Normaliza trim para evitar duplicatas
     """
     if df is None or len(df) == 0:
         return
 
-    # -------- Validação dura: Paciente obrigatório --------
     if "Paciente" not in df.columns:
         raise ValueError("Coluna 'Paciente' não encontrada no DataFrame.")
 
@@ -208,7 +199,6 @@ def upsert_dataframe(df):
             f"Existem {num_blank} registro(s) com 'Paciente' vazio. "
             "Preencha todos os nomes antes de salvar."
         )
-    # ----------------------------------------------------
 
     engine = get_engine()
     with engine.begin() as conn:
@@ -233,9 +223,6 @@ def upsert_dataframe(df):
 
 
 def read_all():
-    """
-    Lê todos os registros, ordenando por Hospital, Ano, Mes, Dia, Paciente, Prestador.
-    """
     engine = get_engine()
     with engine.connect() as conn:
         rs = conn.execute(text("""
@@ -247,11 +234,8 @@ def read_all():
     return rows
 
 
-# ---------- Utilitários opcionais (podem ajudar no app) ----------
+# ---------- Utilitários opcionais ----------
 def read_by_hospital(hospital: str):
-    """
-    Lê registros de um hospital específico, ordenados por Ano/Mes/Dia/Paciente/Prestador.
-    """
     engine = get_engine()
     with engine.connect() as conn:
         rs = conn.execute(text("""
@@ -264,18 +248,13 @@ def read_by_hospital(hospital: str):
 
 
 def read_by_hospital_period(hospital: str, ano: Optional[int] = None, mes: Optional[int] = None):
-    """
-    Lê registros filtrando por hospital e (opcionalmente) ano/mes.
-    """
     engine = get_engine()
     where = ["Hospital = :h"]
     params = {"h": hospital}
     if ano is not None:
-        where.append("Ano = :a")
-        params["a"] = int(ano)
+        where.append("Ano = :a"); params["a"] = int(ano)
     if mes is not None:
-        where.append("Mes = :m")
-        params["m"] = int(mes)
+        where.append("Mes = :m"); params["m"] = int(mes)
     sql = f"""
         SELECT Hospital, Ano, Mes, Dia, Data, Atendimento, Paciente, Aviso, Convenio, Prestador, Quarto
         FROM pacientes_unicos_por_dia_prestador
@@ -288,18 +267,12 @@ def read_by_hospital_period(hospital: str, ano: Optional[int] = None, mes: Optio
 
 
 def delete_all():
-    """
-    Limpa completamente a tabela (use com cautela).
-    """
     engine = get_engine()
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM pacientes_unicos_por_dia_prestador"))
 
 
 def count_all():
-    """
-    Retorna a quantidade de linhas na tabela.
-    """
     engine = get_engine()
     with engine.connect() as conn:
         rs = conn.execute(text("SELECT COUNT(1) FROM pacientes_unicos_por_dia_prestador"))
@@ -308,9 +281,6 @@ def count_all():
 
 # ---------------- Catálogos (Tipos / Situações) ----------------
 def upsert_procedimento_tipo(nome: str, ativo: int = 1, ordem: int = 0) -> int:
-    """
-    Cria ou atualiza (por nome único). Retorna id.
-    """
     engine = get_engine()
     with engine.begin() as conn:
         rs = conn.execute(text("SELECT id FROM procedimento_tipos WHERE nome = :n"), {"n": nome.strip()})
@@ -328,9 +298,6 @@ def upsert_procedimento_tipo(nome: str, ativo: int = 1, ordem: int = 0) -> int:
 
 
 def list_procedimento_tipos(only_active: bool = True):
-    """
-    Lista tipos de procedimento (opção: apenas ativos).
-    """
     engine = get_engine()
     with engine.connect() as conn:
         if only_active:
@@ -341,18 +308,12 @@ def list_procedimento_tipos(only_active: bool = True):
 
 
 def set_procedimento_tipo_status(id_: int, ativo: int):
-    """
-    Atualiza flag 'ativo' de um tipo de procedimento.
-    """
     engine = get_engine()
     with engine.begin() as conn:
         conn.execute(text("UPDATE procedimento_tipos SET ativo = :a WHERE id = :id"), {"a": int(ativo), "id": int(id_)})
 
 
 def upsert_cirurgia_situacao(nome: str, ativo: int = 1, ordem: int = 0) -> int:
-    """
-    Cria ou atualiza situação de cirurgia (por nome único). Retorna id.
-    """
     engine = get_engine()
     with engine.begin() as conn:
         rs = conn.execute(text("SELECT id FROM cirurgia_situacoes WHERE nome = :n"), {"n": nome.strip()})
@@ -370,9 +331,6 @@ def upsert_cirurgia_situacao(nome: str, ativo: int = 1, ordem: int = 0) -> int:
 
 
 def list_cirurgia_situacoes(only_active: bool = True):
-    """
-    Lista situações de cirurgia (opção: apenas ativas).
-    """
     engine = get_engine()
     with engine.connect() as conn:
         if only_active:
@@ -383,9 +341,6 @@ def list_cirurgia_situacoes(only_active: bool = True):
 
 
 def set_cirurgia_situacao_status(id_: int, ativo: int):
-    """
-    Atualiza flag 'ativo' de uma situação de cirurgia.
-    """
     engine = get_engine()
     with engine.begin() as conn:
         conn.execute(text("UPDATE cirurgia_situacoes SET ativo = :a WHERE id = :id"), {"a": int(ativo), "id": int(id_)})
@@ -399,7 +354,6 @@ def insert_or_update_cirurgia(payload: Dict[str, Any]) -> int:
     """
     engine = get_engine()
     with engine.begin() as conn:
-        # Tenta achar existente (segue a unique key)
         rs = conn.execute(text("""
             SELECT id FROM cirurgias
             WHERE Hospital = :h AND Atendimento = :att AND Prestador = :p AND Data_Cirurgia = :d
@@ -458,7 +412,7 @@ def insert_or_update_cirurgia(payload: Dict[str, Any]) -> int:
 
 def list_cirurgias(
     hospital: Optional[str] = None,
-    ano_mes: Optional[str] = None,  # "YYYY-MM" ou "MM/YYYY" se Data_Cirurgia no seu formato
+    ano_mes: Optional[str] = None,  # "YYYY-MM" ou "MM/YYYY"
     prestador: Optional[str] = None
 ):
     """
@@ -490,9 +444,6 @@ def list_cirurgias(
 
 
 def delete_cirurgia(id_: int):
-    """
-    Exclui uma cirurgia pelo id.
-    """
     engine = get_engine()
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM cirurgias WHERE id = :id"), {"id": int(id_)})
@@ -509,55 +460,53 @@ def find_registros_para_prefill(
     Retorna registros da tabela original para servir de base na criação de cirurgias.
 
     Filtros:
-      - hospital (case-insensitive)
-      - ano/mes (opcionais, inteiros)
-      - prestadores (opcional; comparação case-insensitive e sem acentos)
-
-    Observações:
-      - Se 'prestadores' vier vazio/None, não aplica filtro por prestador.
-      - A normalização remove acentos e compara em UPPER, robusto a variações
-        como 'CASSIO CESAR' vs 'Cássio César'.
+      - Hospital (case-insensitive, com TRIM)
+      - Ano/Mês (opcionais) — com fallback via Data LIKE se Ano/Mês na tabela estiverem 0/NULL
+      - Prestadores (opcional) — filtrado em PYTHON com normalização agressiva
+        (sem acentos, sem espaços, sem pontuação, UPPER).
     """
     engine = get_engine()
 
-    # Normalização auxiliar: remove acentos e aplica UPPER+trim
-    def _norm_upper_no_accents(s: Optional[str]) -> str:
-        import unicodedata
+    # ---- Normalizadores para filtro em Python ----
+    import unicodedata
+    def _strip_accents(s: str) -> str:
+        return "".join(ch for ch in unicodedata.normalize("NFKD", s) if not unicodedata.combining(ch))
+
+    def _normalize_name(s: Optional[str]) -> str:
+        """
+        Remove acentos, espaços e pontuações comuns; aplica UPPER.
+        Ex.: 'Cássio-Cesar ' -> 'CASSIOCESAR'
+        """
         if s is None:
             return ""
-        s = str(s).strip()
-        s = "".join(ch for ch in unicodedata.normalize("NFKD", s) if not unicodedata.combining(ch))
-        return s.upper().strip()
+        t = _strip_accents(str(s)).upper()
+        for ch in (" ", ".", "-", "_", "/", "\\"):
+            t = t.replace(ch, "")
+        return t.strip()
 
+    # ---- Monta WHERE só com Hospital/Ano/Mês (prestador será filtrado em Python) ----
     where = []
     params = {}
 
-    # Hospital em case-insensitive
-    where.append("UPPER(Hospital) = UPPER(:h)")
+    # Hospital com TRIM + UPPER para evitar problemas de espaços e case
+    where.append("UPPER(TRIM(Hospital)) = UPPER(:h)")
     params["h"] = hospital.strip()
 
-    if ano is not None:
-        where.append("Ano = :a")
+    # Ano/Mês com fallback por LIKE em Data (dd/MM/yyyy)
+    if ano is not None and mes is not None:
         params["a"] = int(ano)
-
-    if mes is not None:
-        where.append("Mes = :m")
         params["m"] = int(mes)
-
-    # Prestadores: opcional — se vier vazio, não filtra
-    prestadores = [p for p in (prestadores or []) if p and str(p).strip()]
-    if prestadores:
-        # Normaliza cada prestador (sem acentos, UPPER)
-        prest_norm = [_norm_upper_no_accents(p) for p in prestadores]
-
-        # Como SQLite não tem função para remover acentos nativamente,
-        # comparamos por UPPER(Prestador) exato após normalização do lado dos parâmetros.
-        ors = []
-        for i, p in enumerate(prest_norm):
-            key = f"pn{i}"
-            ors.append(f"UPPER(Prestador) = :{key}")
-            params[key] = p
-        where.append("(" + " OR ".join(ors) + ")")
+        params["dm_like"] = f"%/{int(mes):02d}/{int(ano)}%"
+        where.append("(Ano = :a OR Ano IS NULL OR Ano = 0 OR Data LIKE :dm_like)")
+        where.append("(Mes = :m OR Mes IS NULL OR Mes = 0 OR Data LIKE :dm_like)")
+    elif ano is not None:
+        params["a"] = int(ano)
+        params["a_like"] = f"%{int(ano)}%"
+        where.append("(Ano = :a OR Ano IS NULL OR Ano = 0 OR Data LIKE :a_like)")
+    elif mes is not None:
+        params["m"] = int(mes)
+        params["m_like"] = f"%/{int(mes):02d}/%"
+        where.append("(Mes = :m OR Mes IS NULL OR Mes = 0 OR Data LIKE :m_like)")
 
     sql = f"""
         SELECT Hospital, Data, Atendimento, Paciente, Convenio, Prestador
@@ -567,11 +516,23 @@ def find_registros_para_prefill(
     """
 
     with engine.connect() as conn:
-        rs = conn.execute(text(sql), params)
-        return rs.fetchall()
+        rows = conn.execute(text(sql), params).fetchall()
+
+    # ---- Filtro opcional por prestadores em Python (accent/punct/space insensitive) ----
+    prestadores = [p for p in (prestadores or []) if p and str(p).strip()]
+    if not prestadores:
+        return rows  # sem filtro de prestadores
+
+    target_norm = {_normalize_name(p) for p in prestadores}
+    filtered = []
+    for (h, data, att, pac, conv, prest) in rows:
+        if _normalize_name(prest) in target_norm:
+            filtered.append((h, data, att, pac, conv, prest))
+
+    return filtered
 
 
-# ---------- (Opcional) Diagnóstico rápido: listar base sem filtros ----------
+# ---------- (Opcional) Diagnóstico rápido ----------
 def list_registros_base_all(limit: int = 500):
     """
     Lista até 'limit' registros da tabela base (pacientes_unicos_por_dia_prestador)
