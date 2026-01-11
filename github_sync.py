@@ -24,7 +24,6 @@ def _normalize_repo_path(path_in_repo: str) -> str:
     if not path_in_repo:
         raise ValueError("path_in_repo vazio.")
     p = str(path_in_repo).strip()
-    # remove prefixos indesejados
     while p.startswith("/") or p.startswith("./") or p.startswith(".\\") or p.startswith("\\"):
         if p.startswith("./"):
             p = p[2:]
@@ -56,10 +55,16 @@ def download_db_from_github(owner: str, repo: str, path_in_repo: str, branch: st
         os.makedirs(os.path.dirname(local_db_path), exist_ok=True)
         with open(local_db_path, "wb") as f:
             f.write(content_bytes)
+
+        # garante permissão de escrita para o processo
+        try:
+            os.chmod(local_db_path, 0o666)
+        except Exception:
+            pass
+
         return True
 
     elif r.status_code == 404:
-        # Arquivo ainda não existe no repo
         return False
     else:
         raise RuntimeError(f"Falha ao baixar do GitHub: {r.status_code} - {r.text}")
@@ -77,7 +82,6 @@ def upload_db_to_github(owner: str, repo: str, path_in_repo: str, branch: str, l
     url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path_norm}"
     headers = _gh_headers()
 
-    # Obtém o SHA atual (se existir)
     r_get = requests.get(url, headers=headers, params={"ref": branch})
     sha = r_get.json().get("sha") if r_get.status_code == 200 else None
 
