@@ -253,14 +253,27 @@ with tabs[1]:
 
     # -------- Filtros de carregamento --------
     st.markdown("#### Filtros para carregar pacientes na Lista de Cirurgias")
-    colF1, colF2, colF3 = st.columns(3)
+    # ALTERAÇÃO: adiciona checkbox para tornar Ano/Mês opcionais
+    colF0, colF1, colF2, colF3 = st.columns([1, 1, 1, 1])
+    with colF0:
+        usar_periodo = st.checkbox(
+            "Filtrar por Ano/Mês",
+            value=True,
+            help="Desmarque para carregar todos os pacientes do hospital, independente do período."
+        )
     with colF1:
         hosp_cad = st.selectbox("Filtro Hospital (lista)", options=HOSPITAL_OPCOES, index=0)
     now = datetime.now()
     with colF2:
-        ano_cad = st.number_input("Ano (filtro base)", min_value=2000, max_value=2100, value=now.year, step=1)
+        ano_cad = st.number_input(
+            "Ano (filtro base)", min_value=2000, max_value=2100,
+            value=now.year, step=1, disabled=not usar_periodo
+        )
     with colF3:
-        mes_cad = st.number_input("Mês (filtro base)", min_value=1, max_value=12, value=now.month, step=1)
+        mes_cad = st.number_input(
+            "Mês (filtro base)", min_value=1, max_value=12,
+            value=now.month, step=1, disabled=not usar_periodo
+        )
 
     # Prestadores vazio por padrão → não filtra
     prestadores_filtro = st.text_input(
@@ -304,28 +317,37 @@ with tabs[1]:
         # 2) Registros base da tabela de pacientes para período/hospital
         base_rows = find_registros_para_prefill(
             hosp_cad,
-            ano=int(ano_cad) if ano_cad else None,
-            mes=int(mes_cad) if mes_cad else None,
+            ano=int(ano_cad) if usar_periodo else None,  # ALTERAÇÃO: condicional
+            mes=int(mes_cad) if usar_periodo else None,  # ALTERAÇÃO: condicional
             prestadores=prestadores_lista_filtro  # vazio -> não filtra
         )
         df_base = pd.DataFrame(base_rows, columns=["Hospital", "Data", "Atendimento", "Paciente", "Convenio", "Prestador"])
         if df_base.empty:
             df_base = pd.DataFrame(columns=["Hospital", "Data", "Atendimento", "Paciente", "Convenio", "Prestador"])
         else:
-            # tudo certo, segue o fluxo
-            pass
+            # ALTERAÇÃO: evita "nan" string ao converter para grid
+            for col in ["Hospital", "Data", "Atendimento", "Paciente", "Convenio", "Prestador"]:
+                df_base[col] = df_base[col].fillna("").astype(str)
 
         st.info(f"Cirurgias já salvas encontradas: {len(df_cir)} | Candidatos da base (período/hospital): {len(df_base)}")
+
+        # Aviso de diagnóstico quando não retorna candidatos
+        # ALTERAÇÃO: diagnóstico amigável
+        if df_base.empty:
+            st.warning("Nenhum candidato carregado da base com os filtros atuais.")
+            st.markdown("- Confira se o **Hospital** na Aba 2 coincide com o hospital salvo na Aba 1.")
+            st.markdown("- Ajuste **Ano/Mês** para o período dos registros ou desmarque **Filtrar por Ano/Mês**.")
+            st.markdown("- Deixe **Prestadores** vazio para não filtrar, ou valide a escrita dos nomes.")
 
         # Mapeia para o esquema da tabela cirurgias (campos manuais vazios)
         df_base_mapped = pd.DataFrame({
             "id": [None]*len(df_base),
-            "Hospital": df_base["Hospital"].astype(str),
-            "Atendimento": df_base["Atendimento"].astype(str),
-            "Paciente": df_base["Paciente"].astype(str),
-            "Prestador": df_base["Prestador"].astype(str),
-            "Data_Cirurgia": df_base["Data"].astype(str),  # usa Data como Data_Cirurgia
-            "Convenio": df_base["Convenio"].astype(str),
+            "Hospital": df_base["Hospital"],
+            "Atendimento": df_base["Atendimento"],
+            "Paciente": df_base["Paciente"],
+            "Prestador": df_base["Prestador"],
+            "Data_Cirurgia": df_base["Data"],  # usa Data como Data_Cirurgia
+            "Convenio": df_base["Convenio"],
             "Procedimento_Tipo_ID": [None]*len(df_base),
             "Situacao_ID": [None]*len(df_base),
             "Guia_AMHPTISS": ["" for _ in range(len(df_base))],
@@ -340,12 +362,19 @@ with tabs[1]:
         })
 
         # 3) União preferindo cirurgias já existentes (para evitar duplicar a mesma chave)
-        KEY_COLS = ["Hospital", "Atendimento", "Prestador", "Data_Cirurgia"]
+        # ALTERAÇÃO: chave resiliente usa Atendimento quando houver; senão Paciente
         df_union = pd.concat([df_cir, df_base_mapped], ignore_index=True)
         df_union["_has_id"] = df_union["id"].notna().astype(int)
+
+        # Cria coluna chave mista (Atendimento se disponível, senão Paciente)
+        df_union["_AttOrPac"] = df_union["Atendimento"].fillna("").astype(str).str.strip()
+        empty_mask = df_union["_AttOrPac"] == ""
+        df_union.loc[empty_mask, "_AttOrPac"] = df_union.loc[empty_mask, "Paciente"].fillna("").astype(str).str.strip()
+
+        KEY_COLS = ["Hospital", "_AttOrPac", "Prestador", "Data_Cirurgia"]
         df_union = df_union.sort_values(KEY_COLS + ["_has_id"], ascending=[True, True, True, True, False])
         df_union = df_union.drop_duplicates(subset=KEY_COLS, keep="first")
-        df_union.drop(columns=["_has_id"], inplace=True)
+        df_union.drop(columns=["_has_id", "_AttOrPac"], inplace=True)
 
         st.markdown("#### Lista de Cirurgias (com pacientes carregados da base)")
         st.caption("Edite diretamente no grid. Linhas com Fonte=Base são novos candidatos a cirurgia; ao salvar, viram registros na tabela de cirurgias.")
@@ -394,7 +423,7 @@ with tabs[1]:
                         att = str(r.get("Atendimento", "")).strip()
                         p = str(r.get("Prestador", "")).strip()
                         d = str(r.get("Data_Cirurgia", "")).strip()
-                        if h and att and p and d:
+                        if h and p and d and (att or str(r.get("Paciente", "")).strip()):
                             payload = {
                                 "Hospital": h,
                                 "Atendimento": att,
