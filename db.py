@@ -4,15 +4,48 @@ from __future__ import annotations
 
 import os
 import math
+import tempfile
 from typing import Optional, Tuple, List, Dict
 import pandas as pd
 from sqlalchemy import create_engine, text
 
-# ---------------- Configuração de caminho persistente ----------------
-MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(MODULE_DIR, "data")
-os.makedirs(DATA_DIR, exist_ok=True)
+# ---------------- Escolha de diretório gravável ----------------
+def _pick_data_dir() -> str:
+    """
+    Escolhe uma pasta gravável para o SQLite:
+    1) APP_DATA_DIR (var de ambiente)
+    2) /mount/data  (Streamlit Cloud)
+    3) /tmp/acompanhamento_data
+    4) ./data (fallback) SE for gravável
+    """
+    candidates = []
 
+    env_dir = os.environ.get("APP_DATA_DIR", "").strip()
+    if env_dir:
+        candidates.append(env_dir)
+
+    candidates.append("/mount/data")
+    candidates.append(os.path.join(tempfile.gettempdir(), "acompanhamento_data"))
+
+    module_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates.append(os.path.join(module_dir, "data"))
+
+    for d in candidates:
+        try:
+            os.makedirs(d, exist_ok=True)
+            testfile = os.path.join(d, ".write_test")
+            with open(testfile, "wb") as f:
+                f.write(b"ok")
+            os.remove(testfile)
+            return d
+        except Exception:
+            continue
+
+    fallback = os.path.join(tempfile.gettempdir(), "acompanhamento_data")
+    os.makedirs(fallback, exist_ok=True)
+    return fallback
+
+DATA_DIR = _pick_data_dir()
 DB_PATH = os.path.join(DATA_DIR, "exemplo.db")
 DB_URI = f"sqlite:///{DB_PATH}"
 
@@ -90,22 +123,16 @@ def init_db():
         # ---------------- Equipe (Filha) ----------------
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS autorizacoes_equipes (
-            NaturalKey   TEXT,      -- FK lógico para autorizacoes_pendencias.NaturalKey
+            NaturalKey   TEXT,
             Prestador    TEXT,
-            Papel        TEXT,      -- ex.: Cirurgião, Auxiliar I, Anestesista, Instrumentador...
-            Participacao TEXT,      -- ex.: 70%, 'Responsável', 'Auxiliar II'...
-            Observacao   TEXT
+            Papel        TEXT,
+            Participacao TEXT,
+            Observacao   TEXT,
+            UNIQUE (NaturalKey, Prestador, Papel)
         );
         """))
 
-        conn.execute(text("""
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_eq_unique
-        ON autorizacoes_equipes (NaturalKey, Prestador, Papel);
-        """))
-        conn.execute(text("""
-        CREATE INDEX IF NOT EXISTS idx_eq_por_nk
-        ON autorizacoes_equipes (NaturalKey);
-        """))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_eq_por_nk ON autorizacoes_equipes (NaturalKey);"))
 
 
 # ---------------- Converters/Helpers ----------------
@@ -390,7 +417,6 @@ def upsert_equipes(nk: str, df: pd.DataFrame):
             papel = _safe_str(row.get("Papel", ""))
             part  = _safe_str(row.get("Participacao", ""))
             obs   = _safe_str(row.get("Observacao", ""))
-            # ignora linha totalmente vazia
             if prest == "" and papel == "" and part == "" and obs == "":
                 continue
             conn.execute(text("""
@@ -420,7 +446,6 @@ def distinct_prestadores_for_auth(nk: str) -> List[str]:
         return []
     engine = get_engine()
     with engine.connect() as conn:
-        # Preferência: Atendimento
         att = _safe_str(auth.get("Atendimento", ""))
         if att:
             rs = conn.execute(text("""
@@ -454,7 +479,6 @@ def sync_equipes_from_pacientes() -> Tuple[int, int]:
             auth = get_aut_by_nk(nk)
             if auth is None:
                 continue
-            # Prestadores candidatos
             att = _safe_str(auth.get("Atendimento", ""))
             if att:
                 rs_cand = conn.execute(text("""
@@ -476,7 +500,6 @@ def sync_equipes_from_pacientes() -> Tuple[int, int]:
 
             afetadas += 1
 
-            # Prestadores já cadastrados
             rs2 = conn.execute(text("""
                 SELECT DISTINCT Prestador FROM autorizacoes_equipes WHERE NaturalKey = :nk
             """), {"nk": nk})
@@ -523,13 +546,12 @@ def sync_autorizacoes_from_pacientes(default_status: str = "EM ANDAMENTO") -> Tu
             }
             nk = _mk_aut_key_from_patient(patient)
 
-            # UPDATE (espelho)
             upd = conn.execute(text("""
                 UPDATE autorizacoes_pendencias
                    SET Unidade = :Unidade,
                        Atendimento = :Atendimento,
                        Paciente = :Paciente,
-                       Profissional = :Profissional,   -- define 'principal' inicial como último prestador visto
+                       Profissional = :Profissional,
                        Data_Cirurgia = :Data_Cirurgia,
                        Convenio = :Convenio,
                        UltimaAtualizacao = :UltimaAtualizacao
@@ -546,25 +568,9 @@ def sync_autorizacoes_from_pacientes(default_status: str = "EM ANDAMENTO") -> Tu
             })
             atualizados += upd.rowcount
 
-            # INSERT (se não existir)
             ins = conn.execute(text("""
                 INSERT OR IGNORE INTO autorizacoes_pendencias
                 (Unidade, Atendimento, Paciente, Profissional, Data_Cirurgia, Convenio,
                  Tipo_Procedimento, Observacoes, Guia_AMHPTISS, Guia_AMHPTISS_Complemento, Fatura,
                  Status, NaturalKey, UltimaAtualizacao)
                 VALUES (:Unidade, :Atendimento, :Paciente, :Profissional, :Data_Cirurgia, :Convenio,
-                        '', '', '', '', '', :Status, :NaturalKey, :UltimaAtualizacao)
-            """), {
-                "Unidade": patient["Hospital"],
-                "Atendimento": patient["Atendimento"],
-                "Paciente": patient["Paciente"],
-                "Profissional": patient["Prestador"],
-                "Data_Cirurgia": patient["Data"],
-                "Convenio": patient["Convenio"],
-                "Status": default_status,
-                "NaturalKey": nk,
-                "UltimaAtualizacao": now_iso
-            })
-            novos += ins.rowcount
-
-    return novos, atualizados
