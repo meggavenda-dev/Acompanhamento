@@ -15,12 +15,34 @@ def _gh_headers():
         "Accept": "application/vnd.github+json"
     }
 
+def _normalize_repo_path(path_in_repo: str) -> str:
+    """
+    Normaliza o 'path' exigido pela API /repos/{owner}/{repo}/contents/{path}:
+    - não pode começar com '/', './' ou '.\\'
+    - remove espaços nas pontas
+    """
+    if not path_in_repo:
+        raise ValueError("path_in_repo vazio.")
+    p = str(path_in_repo).strip()
+    # remove prefixos indesejados
+    while p.startswith("/") or p.startswith("./") or p.startswith(".\\") or p.startswith("\\"):
+        if p.startswith("./"):
+            p = p[2:]
+        elif p.startswith(".\\"):
+            p = p[3:]
+        else:
+            p = p[1:]
+    if p == "":
+        raise ValueError("path_in_repo inválido após normalização.")
+    return p
+
 def download_db_from_github(owner: str, repo: str, path_in_repo: str, branch: str, local_db_path: str) -> bool:
     """
     Baixa (GET contents) o arquivo SQLite do GitHub e grava em local_db_path.
     Retorna True se baixou, False se não existe no repo.
     """
-    url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path_in_repo}?ref={branch}"
+    path_norm = _normalize_repo_path(path_in_repo)
+    url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path_norm}?ref={branch}"
     headers = _gh_headers()
     r = requests.get(url, headers=headers)
 
@@ -28,12 +50,9 @@ def download_db_from_github(owner: str, repo: str, path_in_repo: str, branch: st
         data = r.json()
         if "content" not in data:
             raise RuntimeError(f"Resposta inesperada da API do GitHub (sem 'content'): {json.dumps(data)[:300]}")
-        content_b64 = data["content"]
-        # Remover possíveis quebras de linha
-        content_b64 = content_b64.replace("\n", "")
+        content_b64 = data["content"].replace("\n", "")
         content_bytes = base64.b64decode(content_b64)
 
-        # Garante diretório
         os.makedirs(os.path.dirname(local_db_path), exist_ok=True)
         with open(local_db_path, "wb") as f:
             f.write(content_bytes)
@@ -54,14 +73,14 @@ def upload_db_to_github(owner: str, repo: str, path_in_repo: str, branch: str, l
     if not os.path.exists(local_db_path):
         raise FileNotFoundError(f"Arquivo local não encontrado: {local_db_path}")
 
-    url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path_in_repo}"
+    path_norm = _normalize_repo_path(path_in_repo)
+    url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path_norm}"
     headers = _gh_headers()
 
     # Obtém o SHA atual (se existir)
     r_get = requests.get(url, headers=headers, params={"ref": branch})
     sha = r_get.json().get("sha") if r_get.status_code == 200 else None
 
-    # Lê arquivo e codifica base64
     with open(local_db_path, "rb") as f:
         content_bytes = f.read()
     content_b64 = base64.b64encode(content_bytes).decode("utf-8")
@@ -70,7 +89,6 @@ def upload_db_to_github(owner: str, repo: str, path_in_repo: str, branch: str, l
         "message": commit_message,
         "content": content_b64,
         "branch": branch,
-        # Opcional: metadata para auditoria
         "committer": {"name": "Streamlit App", "email": "streamlit@app.local"},
     }
     if sha:
