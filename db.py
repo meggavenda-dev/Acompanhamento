@@ -602,3 +602,46 @@ def list_registros_base_all(limit: int = 500):
             LIMIT {int(limit)}
         """))
         return rs.fetchall()
+
+
+# =======================
+# 🧨 DANGER ZONE / RESET
+# =======================
+def delete_all_pacientes():
+    """
+    Apaga todos os registros da tabela base de pacientes.
+    """
+    engine = get_engine()
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM pacientes_unicos_por_dia_prestador"))
+
+
+def delete_all_cirurgias():
+    """
+    Apaga todas as cirurgias.
+    """
+    engine = get_engine()
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM cirurgias"))
+
+
+def delete_all_catalogos():
+    """
+    Apaga todos os registros dos catálogos (Tipos e Situações).
+    """
+    engine = get_engine()
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM procedimento_tipos"))
+        conn.execute(text("DELETE FROM cirurgia_situacoes"))
+
+
+def vacuum():
+    """
+    Executa VACUUM para compactar o arquivo SQLite após operações de DELETE.
+    Observação: precisa rodar fora de transação.
+    """
+    engine = get_engine()
+    # Executa em AUTOCOMMIT para permitir VACUUM
+    with engine.connect() as conn:
+        conn = conn.execution_options(isolation_level="AUTOCOMMIT")
+        conn.exec_driver_sql("VACUUM")
