@@ -4,14 +4,38 @@ from __future__ import annotations
 
 import os
 import math
+import tempfile
 from typing import Optional, List, Dict, Any
 from sqlalchemy import create_engine, text
 
-# ---------------- Configuração de caminho persistente ----------------
-MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(MODULE_DIR, "data")
-os.makedirs(DATA_DIR, exist_ok=True)
+# ---------------- Configuração de caminho persistente (writable) ----------------
+def _pick_writable_dir() -> str:
+    """
+    Escolhe um diretório garantidamente gravável:
+    1) st.secrets["DB_DIR"] se existir;
+    2) env var DB_DIR se existir;
+    3) /tmp (tempfile.gettempdir()) como fallback.
+    """
+    db_dir = os.environ.get("DB_DIR", "")
+    # Tenta pegar do Streamlit secrets sem impor dependência forte
+    try:
+        import streamlit as st
+        db_dir = st.secrets.get("DB_DIR", db_dir)
+    except Exception:
+        pass
 
+    if not db_dir:
+        db_dir = os.path.join(tempfile.gettempdir(), "acompanhamento_data")
+
+    os.makedirs(db_dir, exist_ok=True)
+    # Garante permissões de escrita no diretório
+    try:
+        os.chmod(db_dir, 0o777)
+    except Exception:
+        pass
+    return db_dir
+
+DATA_DIR = _pick_writable_dir()
 DB_PATH = os.path.join(DATA_DIR, "exemplo.db")
 DB_URI = f"sqlite:///{DB_PATH}"
 
@@ -19,12 +43,32 @@ DB_URI = f"sqlite:///{DB_PATH}"
 _ENGINE = None
 def get_engine():
     """
-    Retorna um engine SQLAlchemy para SQLite no arquivo local em ./data/exemplo.db.
+    Retorna um engine SQLAlchemy para SQLite no arquivo local (writable).
+    Usa check_same_thread=False para compat Streamlit.
     """
     global _ENGINE
     if _ENGINE is None:
-        _ENGINE = create_engine(DB_URI, future=True, echo=False)
+        _ENGINE = create_engine(
+            DB_URI,
+            future=True,
+            echo=False,
+            connect_args={"check_same_thread": False}
+        )
     return _ENGINE
+
+
+def _ensure_db_file_writable():
+    """
+    Garante que o arquivo do DB exista e tenha permissão de escrita.
+    """
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    if not os.path.exists(DB_PATH):
+        # cria arquivo vazio para assegurar permissão
+        open(DB_PATH, "a").close()
+    try:
+        os.chmod(DB_PATH, 0o666)
+    except Exception:
+        pass
 
 
 def init_db():
@@ -35,6 +79,7 @@ def init_db():
     - Catálogo: cirurgia_situacoes
     - Tabela: cirurgias
     """
+    _ensure_db_file_writable()
     engine = get_engine()
     with engine.begin() as conn:
         # ---- Tabela original (mantida) ----
@@ -281,6 +326,7 @@ def count_all():
 
 # ---------------- Catálogos (Tipos / Situações) ----------------
 def upsert_procedimento_tipo(nome: str, ativo: int = 1, ordem: int = 0) -> int:
+    _ensure_db_file_writable()
     engine = get_engine()
     with engine.begin() as conn:
         rs = conn.execute(text("SELECT id FROM procedimento_tipos WHERE nome = :n"), {"n": nome.strip()})
@@ -308,12 +354,14 @@ def list_procedimento_tipos(only_active: bool = True):
 
 
 def set_procedimento_tipo_status(id_: int, ativo: int):
+    _ensure_db_file_writable()
     engine = get_engine()
     with engine.begin() as conn:
         conn.execute(text("UPDATE procedimento_tipos SET ativo = :a WHERE id = :id"), {"a": int(ativo), "id": int(id_)})
 
 
 def upsert_cirurgia_situacao(nome: str, ativo: int = 1, ordem: int = 0) -> int:
+    _ensure_db_file_writable()
     engine = get_engine()
     with engine.begin() as conn:
         rs = conn.execute(text("SELECT id FROM cirurgia_situacoes WHERE nome = :n"), {"n": nome.strip()})
@@ -341,6 +389,7 @@ def list_cirurgia_situacoes(only_active: bool = True):
 
 
 def set_cirurgia_situacao_status(id_: int, ativo: int):
+    _ensure_db_file_writable()
     engine = get_engine()
     with engine.begin() as conn:
         conn.execute(text("UPDATE cirurgia_situacoes SET ativo = :a WHERE id = :id"), {"a": int(ativo), "id": int(id_)})
@@ -352,6 +401,7 @@ def insert_or_update_cirurgia(payload: Dict[str, Any]) -> int:
     UPSERT por (Hospital, Atendimento, Prestador, Data_Cirurgia).
     Retorna id da cirurgia.
     """
+    _ensure_db_file_writable()
     engine = get_engine()
     with engine.begin() as conn:
         rs = conn.execute(text("""
@@ -444,6 +494,7 @@ def list_cirurgias(
 
 
 def delete_cirurgia(id_: int):
+    _ensure_db_file_writable()
     engine = get_engine()
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM cirurgias WHERE id = :id"), {"id": int(id_)})
