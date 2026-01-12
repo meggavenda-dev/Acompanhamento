@@ -508,13 +508,15 @@ def find_registros_para_prefill(
     prestadores: Optional[List[str]] = None
 ):
     """
-    Retorna registros da tabela original para servir de base na criação de cirurgias.
+    Retorna registros da tabela base (pacientes_unicos_por_dia_prestador) para servir de base na criação de cirurgias.
 
     Filtros:
-      - Hospital (case-insensitive, com TRIM)
-      - Ano/Mês (opcionais) — com fallback via Data LIKE se Ano/Mês na tabela estiverem 0/NULL
-      - Prestadores (opcional) — filtrado em PYTHON com normalização agressiva
-        (sem acentos, sem espaços, sem pontuação, UPPER).
+      - Hospital (TRIM + UPPER)
+      - Ano/Mês (opcionais)
+        * Caso Ano/Mês na tabela estejam NULL/0, faz fallback por Data LIKE suportando:
+          - dd/MM/yyyy  -> padrão com “/”
+          - YYYY-MM-DD  -> padrão ISO com “-”
+      - Prestadores (opcional) — filtrado em Python com normalização agressiva (sem acentos, sem espaços/pontuação, UPPER).
     """
     engine = get_engine()
 
@@ -524,10 +526,6 @@ def find_registros_para_prefill(
         return "".join(ch for ch in unicodedata.normalize("NFKD", s) if not unicodedata.combining(ch))
 
     def _normalize_name(s: Optional[str]) -> str:
-        """
-        Remove acentos, espaços e pontuações comuns; aplica UPPER.
-        Ex.: 'Cássio-Cesar ' -> 'CASSIOCESAR'
-        """
         if s is None:
             return ""
         t = _strip_accents(str(s)).upper()
@@ -535,29 +533,39 @@ def find_registros_para_prefill(
             t = t.replace(ch, "")
         return t.strip()
 
-    # ---- Monta WHERE só com Hospital/Ano/Mês (prestador será filtrado em Python) ----
-    where = []
-    params = {}
+    # ---- WHERE base: Hospital ----
+    where = ["UPPER(TRIM(Hospital)) = UPPER(:h)"]
+    params = {"h": hospital.strip()}
 
-    # Hospital com TRIM + UPPER para evitar problemas de espaços e case
-    where.append("UPPER(TRIM(Hospital)) = UPPER(:h)")
-    params["h"] = hospital.strip()
-
-    # Ano/Mês com fallback por LIKE em Data (dd/MM/yyyy)
+    # ---- Filtros de Ano/Mês com fallbacks robustos ----
     if ano is not None and mes is not None:
         params["a"] = int(ano)
         params["m"] = int(mes)
-        params["dm_like"] = f"%/{int(mes):02d}/{int(ano)}%"
-        where.append("(Ano = :a OR Ano IS NULL OR Ano = 0 OR Data LIKE :dm_like)")
-        where.append("(Mes = :m OR Mes IS NULL OR Mes = 0 OR Data LIKE :dm_like)")
+        # dd/MM/yyyy
+        params["dm_like_slash"] = f"%/{int(mes):02d}/{int(ano)}%"
+        # YYYY-MM-DD (ISO)
+        params["dm_like_dash"] = f"{int(ano)}-{int(mes):02d}-%"
+
+        where.append("(Ano = :a OR Ano IS NULL OR Ano = 0 OR Data LIKE :dm_like_slash OR Data LIKE :dm_like_dash)")
+        where.append("(Mes = :m OR Mes IS NULL OR Mes = 0 OR Data LIKE :dm_like_slash OR Data LIKE :dm_like_dash)")
+
     elif ano is not None:
         params["a"] = int(ano)
-        params["a_like"] = f"%{int(ano)}%"
-        where.append("(Ano = :a OR Ano IS NULL OR Ano = 0 OR Data LIKE :a_like)")
+        # dd/MM/yyyy: .../YYYY
+        params["a_like_slash"] = f"%/{int(ano)}%"
+        # YYYY-MM-DD: YYYY-
+        params["a_like_dash"] = f"{int(ano)}-%"
+
+        where.append("(Ano = :a OR Ano IS NULL OR Ano = 0 OR Data LIKE :a_like_slash OR Data LIKE :a_like_dash)")
+
     elif mes is not None:
         params["m"] = int(mes)
-        params["m_like"] = f"%/{int(mes):02d}/%"
-        where.append("(Mes = :m OR Mes IS NULL OR Mes = 0 OR Data LIKE :m_like)")
+        # dd/MM/yyyy: /MM/
+        params["m_like_slash"] = f"%/{int(mes):02d}/%"
+        # YYYY-MM-DD: -MM-
+        params["m_like_dash"] = f"%-{int(mes):02d}-%"
+
+        where.append("(Mes = :m OR Mes IS NULL OR Mes = 0 OR Data LIKE :m_like_slash OR Data LIKE :m_like_dash)")
 
     sql = f"""
         SELECT Hospital, Data, Atendimento, Paciente, Convenio, Prestador
@@ -569,10 +577,10 @@ def find_registros_para_prefill(
     with engine.connect() as conn:
         rows = conn.execute(text(sql), params).fetchall()
 
-    # ---- Filtro opcional por prestadores em Python (accent/punct/space insensitive) ----
+    # ---- Filtro opcional por prestadores em Python ----
     prestadores = [p for p in (prestadores or []) if p and str(p).strip()]
     if not prestadores:
-        return rows  # sem filtro de prestadores
+        return rows
 
     target_norm = {_normalize_name(p) for p in prestadores}
     filtered = []
@@ -585,10 +593,6 @@ def find_registros_para_prefill(
 
 # ---------- (Opcional) Diagnóstico rápido ----------
 def list_registros_base_all(limit: int = 500):
-    """
-    Lista até 'limit' registros da tabela base (pacientes_unicos_por_dia_prestador)
-    para diagnóstico rápido na aba de Cirurgias.
-    """
     engine = get_engine()
     with engine.connect() as conn:
         rs = conn.execute(text(f"""
