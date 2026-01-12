@@ -1,4 +1,3 @@
-
 # processing.py
 import io
 import csv
@@ -179,7 +178,7 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 # =========================
-# HERANÇA HOSPITALAR
+# HERANÇA HOSPITALAR (CORRIGIDA)
 # =========================
 
 def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
@@ -192,36 +191,36 @@ def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
     if "_row_idx" not in df.columns:
         df["_row_idx"] = range(len(df))
 
-    df["Data"] = df["Data"].ffill()  # 🔒 nunca bfill
-
     ctx = {
-        "Data": None,
         "Atendimento": None,
         "Paciente": None,
         "Aviso": None,
+        "Data": None,
+        "Centro": None
     }
 
+    # Percorre exatamente na ordem do relatório
     for i in df.sort_values("_row_idx").index:
         row = df.loc[i]
 
+        # Linha principal (abre novo contexto)
         if pd.notna(row["Atendimento"]):
             ctx.update({
-                "Data": row["Data"],
                 "Atendimento": row["Atendimento"],
                 "Paciente": row["Paciente"],
-                "Aviso": row["Aviso"]
+                "Aviso": row["Aviso"],
+                "Data": row["Data"],
+                "Centro": row.get("Centro")
             })
             continue
 
-        if (
-            pd.notna(row["Prestador"]) and
-            pd.notna(row["Hora_Inicio"]) and
-            ctx["Atendimento"] is not None and
-            row["Data"] == ctx["Data"]
-        ):
+        # Linha de prestador / auxiliar
+        if pd.notna(row["Prestador"]) and ctx["Atendimento"] is not None:
             df.at[i, "Atendimento"] = ctx["Atendimento"]
             df.at[i, "Paciente"] = ctx["Paciente"]
             df.at[i, "Aviso"] = ctx["Aviso"]
+            df.at[i, "Data"] = ctx["Data"]
+            df.at[i, "Centro"] = ctx["Centro"]
 
     return df
 
