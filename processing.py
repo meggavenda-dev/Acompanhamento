@@ -77,8 +77,7 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
     for line in text.splitlines():
         if "Data de Realização" in line or "Data de Realiza" in line:
             m_date = DATE_RE.search(line)
-            if m_date:
-                current_date_str = m_date.group(1)
+            if m_date: current_date_str = m_date.group(1)
 
         try:
             tokens = next(csv.reader([line]))
@@ -100,7 +99,6 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
             h0 = time_idxs[0]
             h1 = h0 + 1 if (h0 + 1 < len(tokens) and TIME_RE.match(tokens[h0+1])) else None
             hora_inicio, hora_fim = tokens[h0], (tokens[h1] if h1 else None)
-
             aviso = tokens[h0-1] if (h0-1 >= 0 and re.fullmatch(r"\d{3,}", tokens[h0-1])) else None
             atendimento, paciente = None, None
 
@@ -115,8 +113,7 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
                     break
 
             base_idx = h1 if h1 else h0
-            cirurgia = tokens[base_idx + 1] if base_idx + 1 < len(tokens) else None
-            convenio = tokens[base_idx + 2] if base_idx + 2 < len(tokens) else None
+            cirurgia, convenio = (tokens[base_idx + i] if base_idx + i < len(tokens) else None for i in [1, 2])
             
             p_cand = tokens[base_idx + 3] if base_idx + 3 < len(tokens) else None
             if p_cand and DATE_RE.search(p_cand):
@@ -149,9 +146,9 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
                 row_idx += 1
     return pd.DataFrame(rows)
 
-# =========================
-# Herança
-# =========================
+# ==================================
+# Herança - PRESTADOR DIFERENTE
+# ==================================
 
 def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty: return df
@@ -163,15 +160,25 @@ def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
         df["_row_idx"] = range(len(df))
 
     for _, grp in df.groupby("Data", sort=False):
-        last_att, last_pac, last_av = pd.NA, pd.NA, pd.NA
+        last_att, last_pac, last_av, last_prest = pd.NA, pd.NA, pd.NA, pd.NA
+        
         for i in grp.sort_values("_row_idx").index:
             curr_att, curr_pac, curr_av = df.at[i, "Atendimento"], df.at[i, "Paciente"], df.at[i, "Aviso"]
+            curr_prest = df.at[i, "Prestador"]
+
+            # Regra: Herdar se Prestador Atual != Prestador Anterior e campos estiverem vazios
+            has_prestador = pd.notna(curr_prest) and str(curr_prest).strip() != ""
+            is_different_prestador = str(curr_prest).strip().upper() != str(last_prest).strip().upper()
+            missing_all_3 = pd.isna(curr_att) and pd.isna(curr_pac) and pd.isna(curr_av)
+
+            if has_prestador and is_different_prestador and missing_all_3:
+                df.at[i, "Atendimento"], df.at[i, "Paciente"], df.at[i, "Aviso"] = last_att, last_pac, last_av
+
+            # Atualiza memória para a próxima linha
             if pd.notna(curr_att): last_att = curr_att
             if pd.notna(curr_pac): last_pac = curr_pac
             if pd.notna(curr_av):  last_av  = curr_av
-
-            if pd.notna(df.at[i, "Prestador"]) and pd.isna(curr_att) and pd.isna(curr_pac) and pd.isna(curr_av):
-                df.at[i, "Atendimento"], df.at[i, "Paciente"], df.at[i, "Aviso"] = last_att, last_pac, last_av
+            if has_prestador:      last_prest = curr_prest
                 
     return df
 
@@ -191,31 +198,19 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
             upload.seek(0); text = upload.read().decode("utf-8", errors="ignore")
             df_in = _parse_raw_text_to_rows(text)
     else:
-        text = upload.read().decode("utf-8", errors="ignore")
-        df_in = _parse_raw_text_to_rows(text)
+        text = upload.read().decode("utf-8", errors="ignore"); df_in = _parse_raw_text_to_rows(text)
 
     df_in = _normalize_columns(df_in)
-    
-    # GARANTIA: Cria indexador de ordem original se não existir
-    if "_row_idx" not in df_in.columns:
-        df_in["_row_idx"] = range(len(df_in))
+    if "_row_idx" not in df_in.columns: df_in["_row_idx"] = range(len(df_in))
 
-    # Processamento de herança
     df = _herdar_por_data_ordem_original(df_in)
 
-    # Filtro de prestadores
     target = [_strip_accents(p).strip().upper() for p in prestadores_lista]
     df["Prestador_norm"] = df["Prestador"].apply(lambda x: _strip_accents(x).strip().upper())
     df = df[df["Prestador_norm"].isin(target)].copy()
 
-    # Datas
     dt = pd.to_datetime(df["Data"], format="%d/%m/%Y", errors="coerce")
     df["Hospital"], df["Ano"], df["Mes"], df["Dia"] = selected_hospital, dt.dt.year, dt.dt.month, dt.dt.day
 
-    # Seleção de colunas (Mantendo o _row_idx temporariamente para o sort)
     cols_to_return = ["Hospital", "Ano", "Mes", "Dia", "Data", "Atendimento", "Paciente", "Aviso", "Convenio", "Prestador", "Quarto"]
-    
-    # Ordenação final usando a ordem original das linhas no arquivo
-    df = df.sort_values(["Ano", "Mes", "Dia", "_row_idx"])
-    
-    return df[cols_to_return].reset_index(drop=True)
+    return df.sort_values(["Ano", "Mes", "Dia", "_row_idx"])[cols_to_return].reset_index(drop=True)
