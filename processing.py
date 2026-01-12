@@ -1,5 +1,4 @@
-
-# processing.py
+# processing.py (aplicado com blindagem no parser e ffill na herança)
 import io
 import csv
 import re
@@ -63,6 +62,7 @@ def _is_probably_procedure_token(tok) -> bool:
         return True
     return False
 
+
 def _strip_accents(s: str) -> str:
     """Remove acentos para comparações robustas (Prestador, etc.)."""
     if s is None or pd.isna(s):
@@ -103,154 +103,162 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # =========================
-# Parser de texto bruto
+# Parser de texto bruto (blindado)
 # =========================
 
 def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
     """
     Parser robusto para CSV 'bruto' (relatórios exportados),
     lendo linha a linha em ordem original e extraindo campos.
-    Corrigido para não confundir 'Paciente' com 'Cirurgia' e para não capturar
-    datas internas (ex.: 28/10/1983) como 'Data de Realização'.
+    Blindado para:
+      - Atualizar "Data" somente em cabeçalho "Data de Realização"
+      - Não confundir Paciente com Cirurgia/Convênio/Prestador
+      - Não deixar datas internas (ex.: 28/10/1983) contaminarem o bloco
     """
     rows = []
     current_section = None
     current_date_str = None
+
     ctx = {
-        "atendimento": None, "paciente": None, "aviso": None,
-        "hora_inicio": None, "hora_fim": None, "quarto": None
+        "atendimento": None,
+        "paciente": None,
+        "aviso": None,
+        "hora_inicio": None,
+        "hora_fim": None,
+        "quarto": None,
+        "data_locked": False,   # 🔒 trava data por atendimento
+        "data": None
     }
+
     row_idx = 0
 
-    for line in text.splitlines():
-        # =========================
-        # CORREÇÃO: atualiza a data SOMENTE em cabeçalho "Data de Realização"
-        # usando comparação sem acento e em maiúsculas para ser robusto a encoding.
-        # =========================
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        # 1) Atualiza data SOMENTE em cabeçalho "Data de Realização" (prefix match), acento-insensível
         line_noacc = _strip_accents(line).upper()
         m_date_hdr = DATE_RE.search(line)
-        if ("DATA DE REALIZACAO" in line_noacc) and m_date_hdr:
+        if ("DATA DE REALIZ" in line_noacc) and m_date_hdr:
             yyyy = int(m_date_hdr.group(1).split("/")[-1])
-            # Guard-rail opcional: aceita apenas anos em intervalo plausível
             if 2010 <= yyyy <= 2035:
                 current_date_str = m_date_hdr.group(1)
+                ctx["data_locked"] = False
+            # cabeçalho não é linha de dados
+            continue
+
+        # 2) Seção (zera contexto)
+        if ("CENTRO CIRUR" in line_noacc):
+            current_section = next((kw for kw in SECTION_KEYWORDS if kw in line_noacc), None)
+            ctx = {
+                "atendimento": None, "paciente": None, "aviso": None,
+                "hora_inicio": None, "hora_fim": None, "quarto": None,
+                "data_locked": False, "data": None
+            }
+            continue
+
+        # 3) Cabeçalho / rodapé / quebra de página
+        if any(h in line for h in [
+            "Hora", "Atendimento", "Paciente", "Convênio",
+            "Prestador", "Anestesista", "Tipo Anestesia",
+            "Total", "Total Geral", "Página"
+        ]):
+            ctx["data_locked"] = False
+            continue
 
         # Tokeniza respeitando aspas
         tokens = next(csv.reader([line]))
-        tokens = [t.strip() for t in tokens if t is not None]
+        tokens = [t.strip() for t in tokens if t]
         if not tokens:
             continue
 
-        # Detecta seção (reinicia contexto) – accent-insensitive
-        if ("CENTRO CIRUR" in line_noacc):
-            current_section = next((kw for kw in SECTION_KEYWORDS if kw in line_noacc), None)
-            ctx = {k: None for k in ctx}
-            continue
-
-        # Ignora cabeçalhos/rodapés
-        header_phrases = [
-            "Hora", "Atendimento", "Paciente", "Convênio", "Prestador",
-            "Anestesista", "Tipo Anestesia", "Total", "Total Geral"
-        ]
-        if any(h in line for h in header_phrases):
-            continue
-
-        # Procura horários
+        # 4) Horários
         time_idxs = [i for i, t in enumerate(tokens) if TIME_RE.match(t)]
-        if time_idxs:
-            h0 = time_idxs[0]
-            h1 = h0 + 1 if (h0 + 1 < len(tokens) and TIME_RE.match(tokens[h0 + 1])) else None
-            hora_inicio = tokens[h0]
-            hora_fim = tokens[h1] if h1 is not None else None
-
-            # Aviso imediatamente antes do primeiro horário (código 3+ dígitos)
-            aviso = None
-            if h0 - 1 >= 0 and re.fullmatch(r"\d{3,}", tokens[h0 - 1]):
-                aviso = tokens[h0 - 1]
-
-            # Atendimento e Paciente
-            atendimento = None
-            paciente = None
-
-            # Procura atendimento (número 7-10 dígitos)
-            for i, t in enumerate(tokens):
-                if re.fullmatch(r"\d{7,10}", t):
-                    atendimento = t
-                    # Limita a busca do paciente ao intervalo antes do horário (h0 - 2)
-                    upper_bound = (h0 - 2) if h0 is not None else len(tokens) - 1
-                    if upper_bound >= i + 1:
-                        for j in range(i + 1, upper_bound + 1):
-                            tj = tokens[j]
-                            # Deve ter letras, não ser horário e não "parecer" procedimento
-                            if tj and HAS_LETTER_RE.search(tj) and not TIME_RE.match(tj) and not _is_probably_procedure_token(tj):
-                                paciente = tj
-                                break
-                    break
-
-            base_idx = h1 if h1 is not None else h0
-            cirurgia     = tokens[base_idx + 1] if base_idx + 1 < len(tokens) else None
-            convenio     = tokens[base_idx + 2] if base_idx + 2 < len(tokens) else None
-            prestador    = tokens[base_idx + 3] if base_idx + 3 < len(tokens) else None
-            anestesista  = tokens[base_idx + 4] if base_idx + 4 < len(tokens) else None
-            tipo         = tokens[base_idx + 5] if base_idx + 5 < len(tokens) else None
-            quarto       = tokens[base_idx + 6] if base_idx + 6 < len(tokens) else None
-
-            rows.append({
-                "Centro": current_section,
-                "Data": current_date_str,
-                "Atendimento": atendimento,
-                "Paciente": paciente,
-                "Aviso": aviso,
-                "Hora_Inicio": hora_inicio,
-                "Hora_Fim": hora_fim,
-                "Cirurgia": cirurgia,
-                "Convenio": convenio,
-                "Prestador": prestador,
-                "Anestesista": anestesista,
-                "Tipo_Anestesia": tipo,
-                "Quarto": quarto,
-                "_row_idx": row_idx
-            })
-
-            # Atualiza contexto para eventuais linhas subsequentes sem horário
-            ctx["atendimento"] = atendimento
-            ctx["paciente"] = paciente
-            ctx["aviso"] = aviso
-            ctx["hora_inicio"] = hora_inicio
-            ctx["hora_fim"] = hora_fim
-            ctx["quarto"] = quarto
-
-            row_idx += 1
+        if not time_idxs:
             continue
 
-        # Linhas sem horário (procedimentos adicionais) herdam contexto
-        if current_section and any(tok for tok in tokens):
-            nonempty = [t for t in tokens if t]
-            if len(nonempty) >= 4:
-                cirurgia     = nonempty[0]
-                quarto       = nonempty[-1] if nonempty else None
-                tipo         = nonempty[-2] if len(nonempty) >= 2 else None
-                anestesista  = nonempty[-3] if len(nonempty) >= 3 else None
-                prestador    = nonempty[-4] if len(nonempty) >= 4 else None
-                convenio     = nonempty[-5] if len(nonempty) >= 5 else None
+        h0 = time_idxs[0]
+        h1 = h0 + 1 if (h0 + 1 < len(tokens) and TIME_RE.match(tokens[h0 + 1])) else None
 
-                rows.append({
-                    "Centro": current_section,
-                    "Data": current_date_str,
-                    "Atendimento": ctx["atendimento"],
-                    "Paciente": ctx["paciente"],
-                    "Aviso": ctx["aviso"],
-                    "Hora_Inicio": ctx["hora_inicio"],
-                    "Hora_Fim": ctx["hora_fim"],
-                    "Cirurgia": cirurgia,
-                    "Convenio": convenio,
-                    "Prestador": prestador,
-                    "Anestesista": anestesista,
-                    "Tipo_Anestesia": tipo,
-                    "Quarto": quarto,
-                    "_row_idx": row_idx
-                })
-                row_idx += 1
+        hora_inicio = tokens[h0]
+        hora_fim = tokens[h1] if h1 is not None else None
+
+        # 5) Aviso (código imediatamente antes do primeiro horário)
+        aviso = None
+        if h0 - 1 >= 0 and re.fullmatch(r"\d{3,}", tokens[h0 - 1]):
+            aviso = tokens[h0 - 1]
+
+        # 6) Atendimento explícito (7-10 dígitos)
+        atendimento = None
+        for t in tokens:
+            if re.fullmatch(r"\d{7,10}", t):
+                atendimento = t
+                break
+
+        # Atendimento novo destrava data
+        if atendimento and atendimento != ctx["atendimento"]:
+            ctx["data_locked"] = False
+
+        # Data final: cabeçalho válido → current_date_str; sem cabeçalho → NA
+        data_final = current_date_str if (current_date_str and not ctx["data_locked"]) else ctx["data"]
+        if atendimento and not current_date_str:
+            data_final = pd.NA
+
+        # 7) Paciente entre atendimento e antes do horário (blindado)
+        paciente = None
+        upper_bound = (h0 - 2) if h0 is not None else (len(tokens) - 1)
+        if atendimento is not None and upper_bound >= 0:
+            try:
+                att_idx = tokens.index(atendimento)
+            except ValueError:
+                att_idx = None
+            if att_idx is not None and upper_bound >= att_idx + 1:
+                for j in range(att_idx + 1, upper_bound + 1):
+                    tj = tokens[j]
+                    if tj and HAS_LETTER_RE.search(tj) and not TIME_RE.match(tj) and not _is_probably_procedure_token(tj):
+                        paciente = tj
+                        break
+
+        base_idx = h1 if h1 is not None else h0
+
+        cirurgia     = tokens[base_idx + 1] if base_idx + 1 < len(tokens) else None
+        convenio     = tokens[base_idx + 2] if base_idx + 2 < len(tokens) else None
+        prestador    = tokens[base_idx + 3] if base_idx + 3 < len(tokens) else None
+        anestesista  = tokens[base_idx + 4] if base_idx + 4 < len(tokens) else None
+        tipo         = tokens[base_idx + 5] if base_idx + 5 < len(tokens) else None
+        quarto       = tokens[base_idx + 6] if base_idx + 6 < len(tokens) else None
+
+        rows.append({
+            "Centro": current_section,
+            "Data": data_final,
+            "Atendimento": atendimento,
+            "Paciente": paciente,
+            "Aviso": aviso,
+            "Hora_Inicio": hora_inicio,
+            "Hora_Fim": hora_fim,
+            "Cirurgia": cirurgia,
+            "Convenio": convenio,
+            "Prestador": prestador,
+            "Anestesista": anestesista,
+            "Tipo_Anestesia": tipo,
+            "Quarto": quarto,
+            "_row_idx": row_idx
+        })
+
+        # 8) Atualiza contexto
+        ctx.update({
+            "atendimento": atendimento,
+            "paciente": paciente,
+            "aviso": aviso,
+            "hora_inicio": hora_inicio,
+            "hora_fim": hora_fim,
+            "quarto": quarto,
+            "data": data_final,
+            "data_locked": True if atendimento else False
+        })
+
+        row_idx += 1
 
     return pd.DataFrame(rows)
 
@@ -282,8 +290,8 @@ def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
     if "Data" not in df.columns:
         return df
 
-    # Garante que Data exista em todas as linhas
-    df["Data"] = df["Data"].ffill().bfill()
+    # Garante que Data exista em todas as linhas (apenas ffill)
+    df["Data"] = df["Data"].ffill()
 
     # Varre dia a dia na ordem original
     for _, grp in df.groupby("Data", sort=False):
