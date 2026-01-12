@@ -20,7 +20,7 @@ except Exception:
 GH_OWNER = st.secrets.get("GH_OWNER", "seu-usuario-ou-org")
 GH_REPO = st.secrets.get("GH_REPO", "seu-repo")
 GH_BRANCH = st.secrets.get("GH_BRANCH", "main")
-GH_PATH_IN_REPO = st.secrets.get("GH_DB_PATH", "data/exemplo.db")  # deve coincidir com DB_PATH em db.py
+GH_PATH_IN_REPO = st.secrets.get("GH_DB_PATH", "data/exemplo.db")
 GITHUB_TOKEN_OK = bool(st.secrets.get("GITHUB_TOKEN", ""))
 
 st.set_page_config(page_title="Gestão de Pacientes e Cirurgias", layout="wide")
@@ -29,7 +29,7 @@ st.set_page_config(page_title="Gestão de Pacientes e Cirurgias", layout="wide")
 st.title("Gestão de Pacientes e Cirurgias")
 st.caption("Download automático do banco no GitHub → Importação/Processamento → Revisão/Salvar → Exportar → Cirurgias → Catálogos")
 
-# >>> ALTERAÇÃO: baixar o DB do GitHub APENAS uma vez por sessão ou se não existir localmente
+# >>> Baixar DB do GitHub apenas 1x por sessão (ou se não existir)
 if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
     if ("gh_db_fetched" not in st.session_state) or (not st.session_state["gh_db_fetched"]):
         if not os.path.exists(DB_PATH):
@@ -48,10 +48,9 @@ if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
             except Exception as e:
                 st.warning("Não foi possível baixar o banco do GitHub. Verifique token/permissões em st.secrets.")
                 st.exception(e)
-        # marca que já tentou baixar nesta sessão (evita overwrite em cada rerun)
         st.session_state["gh_db_fetched"] = True
 
-# >>> ALTERAÇÃO: botão opcional na barra lateral para forçar um re-download manual (quando necessário)
+# Botão opcional (sidebar) para re-download manual
 with st.sidebar:
     st.markdown("### Sincronização GitHub")
     if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
@@ -67,7 +66,7 @@ with st.sidebar:
                 if downloaded:
                     st.success("Banco baixado do GitHub (manual).")
                 else:
-                    st.info("Arquivo não existe no repositório. Salve algo para criar o banco.")
+                    st.info("Arquivo não existe no repositório.")
             except Exception as e:
                 st.error("Falha ao baixar do GitHub.")
                 st.exception(e)
@@ -77,19 +76,19 @@ with st.sidebar:
 # Inicializa DB
 init_db()
 
-# Lista única de hospitais para reuso
+# Lista única de hospitais
 HOSPITAL_OPCOES = [
     "Hospital Santa Lucia Sul",
     "Hospital Santa Lucia Norte",
     "Hospital Maria Auxiliadora",
 ]
 
-# ---------------- Abas principais ----------------
+# ---------------- Abas ----------------
 tabs = st.tabs([
     "📥 Importação & Pacientes",
     "🩺 Cirurgias",
     "📚 Cadastro (Tipos & Situações)",
-    "📄 Tipos (Lista)"  # NOVA ABA
+    "📄 Tipos (Lista)"
 ])
 
 # ====================================================================================
@@ -99,7 +98,6 @@ with tabs[0]:
     st.subheader("Pacientes únicos por data, prestador e hospital")
     st.caption("Upload → herança/filtragem/deduplicação → Hospital → editar Paciente → salvar → exportar → commit automático no GitHub")
 
-    # ---------------- Configuração dos Prestadores ----------------
     st.markdown("#### Prestadores alvo")
     prestadores_default = ["JOSE.ADORNO", "CASSIO CESAR", "FERNANDO AND", "SIMAO.MATOS"]
     prestadores_text = st.text_area(
@@ -110,24 +108,21 @@ with tabs[0]:
     )
     prestadores_lista = [p.strip() for p in prestadores_text.splitlines() if p.strip()]
 
-    # ---------------- Hospital do arquivo (lista fixa) ----------------
     st.markdown("#### Hospital deste arquivo")
     selected_hospital = st.selectbox(
         "Selecione o Hospital referente à planilha enviada",
         options=HOSPITAL_OPCOES,
         index=0,
-        help="O hospital selecionado será aplicado a todas as linhas processadas deste arquivo."
+        help="Aplicado a todas as linhas processadas deste arquivo."
     )
 
-    # ---------------- Upload de Arquivo ----------------
     st.markdown("#### Upload de planilha (CSV ou Excel)")
     uploaded_file = st.file_uploader(
         "Escolha o arquivo",
         type=["csv", "xlsx", "xls"],
-        help="Aceita CSV 'bruto' (sem cabeçalho padronizado) ou planilhas estruturadas."
+        help="Aceita CSV 'bruto' ou planilhas estruturadas."
     )
 
-    # ---- Estado para manter DF e controle de uploads ----
     if "df_final" not in st.session_state:
         st.session_state.df_final = None
     if "last_upload_id" not in st.session_state:
@@ -135,13 +130,11 @@ with tabs[0]:
     if "editor_key" not in st.session_state:
         st.session_state.editor_key = "editor_pacientes_initial"
 
-    # Gera um ID único do upload (arquivo + hospital) para detectar nova importação
     def _make_upload_id(file, hospital: str) -> str:
         name = getattr(file, "name", "sem_nome")
         size = getattr(file, "size", 0)
         return f"{name}-{size}-{hospital.strip()}"
 
-    # Botão para limpar e recomeçar (opcional)
     col_reset1, _ = st.columns(2)
     with col_reset1:
         if st.button("🧹 Limpar tabela / reset"):
@@ -150,16 +143,14 @@ with tabs[0]:
             st.session_state.editor_key = "editor_pacientes_reset"
             st.success("Tabela limpa. Faça novo upload para reprocessar.")
 
-    # Processamento (com reset automático do editor em nova importação)
     if uploaded_file is not None:
         current_upload_id = _make_upload_id(uploaded_file, selected_hospital)
-
         if st.session_state.last_upload_id != current_upload_id:
             st.session_state.df_final = None
             st.session_state.editor_key = f"editor_pacientes_{current_upload_id}"
             st.session_state.last_upload_id = current_upload_id
 
-        with st.spinner("Processando arquivo com a lógica consolidada..."):
+        with st.spinner("Processando arquivo..."):
             try:
                 df_final = process_uploaded_file(uploaded_file, prestadores_lista, selected_hospital.strip())
                 if df_final is None or len(df_final) == 0:
@@ -168,16 +159,13 @@ with tabs[0]:
                 else:
                     st.session_state.df_final = df_final
             except Exception as e:
-                st.error("Falha ao processar o arquivo. Verifique o formato da planilha/CSV.")
+                st.error("Falha ao processar o arquivo.")
                 st.exception(e)
 
-    # ---------------- Revisão / Edição ----------------
     if st.session_state.df_final is not None and len(st.session_state.df_final) > 0:
         st.success(f"Processamento concluído! Linhas: {len(st.session_state.df_final)}")
 
         st.markdown("#### Revisar e editar nomes de Paciente (opcional)")
-        st.caption("Edite apenas a coluna 'Paciente' se necessário. As demais estão bloqueadas para evitar alterações acidentais.")
-
         df_to_edit = st.session_state.df_final.sort_values(
             ["Hospital", "Ano", "Mes", "Dia", "Paciente", "Prestador"]
         ).reset_index(drop=True)
@@ -204,13 +192,12 @@ with tabs[0]:
         )
         st.session_state.df_final = edited_df
 
-        # ---------------- Gravar no Banco + commit automático no GitHub ----------------
         st.markdown("#### Persistência")
         if st.button("Salvar no banco (exemplo.db)"):
             try:
                 upsert_dataframe(st.session_state.df_final)
                 total = count_all()
-                st.success(f"Dados salvos com sucesso em exemplo.db. Total de linhas no banco: {total}")
+                st.success(f"Dados salvos com sucesso. Total de linhas no banco: {total}")
 
                 if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
                     try:
@@ -225,17 +212,16 @@ with tabs[0]:
                         if ok:
                             st.success("Sincronização automática com GitHub concluída.")
                     except Exception as e:
-                        st.error("Falha ao sincronizar com GitHub (commit automático).")
+                        st.error("Falha ao sincronizar com GitHub.")
                         st.exception(e)
 
                 st.session_state.df_final = None
                 st.session_state.editor_key = "editor_pacientes_after_save"
 
             except Exception as e:
-                st.error("Falha ao salvar no banco. Veja detalhes abaixo:")
+                st.error("Falha ao salvar no banco.")
                 st.exception(e)
 
-        # ---------------- Exportar Excel (por Hospital) ----------------
         st.markdown("#### Exportar Excel (multi-aba por Hospital)")
         excel_bytes = to_formatted_excel_by_hospital(st.session_state.df_final)
         st.download_button(
@@ -245,7 +231,6 @@ with tabs[0]:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
-    # ---------------- Conteúdo atual do banco ----------------
     st.divider()
     st.markdown("#### Conteúdo atual do banco (exemplo.db)")
     rows = read_all()
@@ -256,7 +241,7 @@ with tabs[0]:
             db_df.sort_values(["Hospital", "Ano", "Mes", "Dia", "Paciente", "Prestador"]),
             use_container_width=True
         )
-        st.markdown("##### Exportar Excel por Hospital (dados do banco)")
+        st.markdown("##### Exportar Excel (dados do banco)")
         excel_bytes_db = to_formatted_excel_by_hospital(db_df)
         st.download_button(
             label="Baixar Excel (Banco)",
@@ -279,11 +264,10 @@ with tabs[1]:
         list_cirurgia_situacoes,
         list_cirurgias,
         delete_cirurgia,
-        list_registros_base_all  # opcional
+        list_registros_base_all
     )
     from export import to_formatted_excel_cirurgias
 
-    # -------- Filtros de carregamento --------
     st.markdown("#### Filtros para carregar pacientes na Lista de Cirurgias")
     colF0, colF1, colF2, colF3 = st.columns([1, 1, 1, 1])
     with colF0:
@@ -306,14 +290,12 @@ with tabs[1]:
             value=now.month, step=1, disabled=not usar_periodo
         )
 
-    # Prestadores vazio por padrão → não filtra
     prestadores_filtro = st.text_input(
         "Prestadores (filtro base, separar por ; ) — deixe vazio para não filtrar",
         value=""
     )
     prestadores_lista_filtro = [p.strip() for p in prestadores_filtro.split(";") if p.strip()]
 
-    # -------- Carregar catálogos (para dropdowns do grid) --------
     tipos = list_procedimento_tipos(only_active=True)
     sits = list_cirurgia_situacoes(only_active=True)
     tipo_nome2id = {t[1]: t[0] for t in tipos}
@@ -321,7 +303,6 @@ with tabs[1]:
     sit_nome2id  = {s[1]: s[0] for s in sits}
     sit_id2nome  = {s[0]: s[1] for s in sits}
 
-    # -------- Montar a Lista de Cirurgias com união (Cirurgias + Base) --------
     try:
         rows_cir = list_cirurgias(hospital=hosp_cad, ano_mes=None, prestador=None)
         df_cir = pd.DataFrame(rows_cir, columns=[
@@ -355,13 +336,15 @@ with tabs[1]:
             for col in ["Hospital", "Data", "Atendimento", "Paciente", "Convenio", "Prestador"]:
                 df_base[col] = df_base[col].fillna("").astype(str)
 
-        st.info(f"Cirurgias já salvas encontradas: {len(df_cir)} | Candidatos da base (período/hospital): {len(df_base)}")
+        st.info(f"Cirurgias já salvas: {len(df_cir)} | Candidatos da base: {len(df_base)}")
 
         if df_base.empty:
             st.warning("Nenhum candidato carregado da base com os filtros atuais.")
-            st.markdown("- Confira se o **Hospital** na Aba 2 coincide com o hospital salvo na Aba 1.")
-            st.markdown("- Ajuste **Ano/Mês** para o período dos registros ou desmarque **Filtrar por Ano/Mês**.")
-            st.markdown("- Deixe **Prestadores** vazio para não filtrar, ou valide a escrita dos nomes.")
+            with st.expander("Diagnóstico do filtro", expanded=False):
+                st.markdown("- Verifique o **Hospital** (coincide com Aba 1?).")
+                st.markdown("- Ajuste **Ano/Mês** ou desmarque **Filtrar por Ano/Mês**.")
+                st.markdown("- Deixe **Prestadores** vazio para não filtrar.")
+                st.markdown("- O filtro agora aceita datas em `dd/MM/yyyy` e `YYYY-MM-DD`.")
 
         df_base_mapped = pd.DataFrame({
             "id": [None]*len(df_base),
@@ -369,7 +352,7 @@ with tabs[1]:
             "Atendimento": df_base["Atendimento"],
             "Paciente": df_base["Paciente"],
             "Prestador": df_base["Prestador"],
-            "Data_Cirurgia": df_base["Data"],  # usa Data como Data_Cirurgia
+            "Data_Cirurgia": df_base["Data"],
             "Convenio": df_base["Convenio"],
             "Procedimento_Tipo_ID": [None]*len(df_base),
             "Situacao_ID": [None]*len(df_base),
@@ -387,7 +370,6 @@ with tabs[1]:
         df_union = pd.concat([df_cir, df_base_mapped], ignore_index=True)
         df_union["_has_id"] = df_union["id"].notna().astype(int)
 
-        # Chave resiliente: usa Atendimento; se vazio, usa Paciente
         df_union["_AttOrPac"] = df_union["Atendimento"].fillna("").astype(str).str.strip()
         empty_mask = df_union["_AttOrPac"] == ""
         df_union.loc[empty_mask, "_AttOrPac"] = df_union.loc[empty_mask, "Paciente"].fillna("").astype(str).str.strip()
@@ -398,7 +380,6 @@ with tabs[1]:
         df_union.drop(columns=["_has_id", "_AttOrPac"], inplace=True)
 
         st.markdown("#### Lista de Cirurgias (com pacientes carregados da base)")
-        st.caption("Edite diretamente no grid. Linhas com Fonte=Base são novos candidatos a cirurgia; ao salvar, viram registros na tabela de cirurgias.")
 
         edited_df = st.data_editor(
             df_union,
@@ -415,8 +396,8 @@ with tabs[1]:
                 "Convenio": st.column_config.TextColumn(),
                 "Tipo (nome)": st.column_config.SelectboxColumn(options=[""] + list(tipo_nome2id.keys()), help="Selecione o tipo de procedimento."),
                 "Situação (nome)": st.column_config.SelectboxColumn(options=[""] + list(sit_nome2id.keys()), help="Selecione a situação da cirurgia."),
-                "Procedimento_Tipo_ID": st.column_config.NumberColumn(disabled=True, help="Preenchido ao salvar pela seleção de 'Tipo (nome)'."),
-                "Situacao_ID": st.column_config.NumberColumn(disabled=True, help="Preenchido ao salvar pela seleção de 'Situação (nome)'."),
+                "Procedimento_Tipo_ID": st.column_config.NumberColumn(disabled=True),
+                "Situacao_ID": st.column_config.NumberColumn(disabled=True),
                 "Guia_AMHPTISS": st.column_config.TextColumn(),
                 "Guia_AMHPTISS_Complemento": st.column_config.TextColumn(),
                 "Fatura": st.column_config.TextColumn(),
@@ -460,7 +441,7 @@ with tabs[1]:
                             num_ok += 1
                         else:
                             num_skip += 1
-                    st.success(f"UPSERT concluído. {num_ok} linha(s) salvas; {num_skip} ignorada(s) (chave incompleta).")
+                    st.success(f"UPSERT concluído. {num_ok} linha(s) salvas; {num_skip} ignorada(s).")
 
                     if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
                         try:
@@ -470,12 +451,12 @@ with tabs[1]:
                                 path_in_repo=GH_PATH_IN_REPO,
                                 branch=GH_BRANCH,
                                 local_db_path=DB_PATH,
-                                commit_message="Atualiza banco SQLite via app (salvar em massa lista de cirurgias)"
+                                commit_message="Atualiza banco SQLite via app (salvar lista de cirurgias)"
                             )
                             if ok:
                                 st.success("Sincronização automática com GitHub concluída.")
                         except Exception as e:
-                            st.error("Falha ao sincronizar com GitHub (commit automático).")
+                            st.error("Falha ao sincronizar com GitHub.")
                             st.exception(e)
 
                 except Exception as e:
@@ -516,7 +497,7 @@ with tabs[1]:
                             if ok:
                                 st.success("Sincronização automática com GitHub concluída.")
                         except Exception as e:
-                            st.error("Falha ao sincronizar com GitHub (commit automático).")
+                            st.error("Falha ao sincronizar com GitHub.")
                             st.exception(e)
                 except Exception as e:
                     st.error("Falha ao excluir.")
@@ -537,23 +518,19 @@ with tabs[1]:
         st.exception(e)
 
 # ====================================================================================
-# 📚 Aba 3: Cadastro (Tipos & Situações) — reset counter + ordem auto-incremental + cadastro em lote
+# 📚 Aba 3: Cadastro (Tipos & Situações) — reset counter + ordem auto-incremental + lote
 # ====================================================================================
 with tabs[2]:
     st.subheader("Catálogos de Tipos de Procedimento e Situações da Cirurgia")
 
-    # --------- Tipos de Procedimento -----------
     st.markdown("#### Tipos de Procedimento")
     colA, colB = st.columns([2, 1])
 
-    # Inicializa contador de reset do formulário individual
     if "tipo_form_reset" not in st.session_state:
         st.session_state["tipo_form_reset"] = 0
-    # Inicializa contador de reset do formulário em lote
     if "tipo_bulk_reset" not in st.session_state:
         st.session_state["tipo_bulk_reset"] = 0
 
-    # Carrega/cacheia df_tipos para calcular next_ordem
     from db import list_procedimento_tipos
     df_tipos_cached = st.session_state.get("df_tipos_cached")
     if df_tipos_cached is None:
@@ -564,7 +541,6 @@ with tabs[2]:
             df_tipos_cached = pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
         st.session_state["df_tipos_cached"] = df_tipos_cached
 
-    # Próxima ordem auto-incremental
     def _next_ordem_from_cache(df: pd.DataFrame) -> int:
         if df.empty or "ordem" not in df.columns:
             return 1
@@ -575,7 +551,6 @@ with tabs[2]:
 
     next_tipo_ordem = _next_ordem_from_cache(df_tipos_cached)
 
-    # >>> ALTERAÇÃO: função utilitária para subir DB ao GitHub após salvar catálogos
     def _upload_db_catalogo(commit_msg: str):
         if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
             try:
@@ -590,10 +565,9 @@ with tabs[2]:
                 if ok:
                     st.success("Sincronização automática com GitHub concluída.")
             except Exception as e:
-                st.error("Falha ao sincronizar com GitHub (commit automático).")
+                st.error("Falha ao sincronizar com GitHub.")
                 st.exception(e)
 
-    # Callback: salva e incrementa reset para limpar widgets (individual)
     def _save_tipo_and_reset():
         try:
             suffix = st.session_state["tipo_form_reset"]
@@ -613,7 +587,6 @@ with tabs[2]:
             tid = upsert_procedimento_tipo(tipo_nome, int(tipo_ativo), int(tipo_ordem))
             st.success(f"Tipo salvo (id={tid}).")
 
-            # Recarrega cache
             tipos_all2 = list_procedimento_tipos(only_active=False)
             df2 = pd.DataFrame(tipos_all2, columns=["id", "nome", "ativo", "ordem"]) if tipos_all2 else pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
             st.session_state["df_tipos_cached"] = df2
@@ -621,16 +594,14 @@ with tabs[2]:
             prox_id = (df2["id"].max() + 1) if not df2.empty else 1
             st.info(f"Próximo ID previsto: {prox_id}")
 
-            # >>> ALTERAÇÃO: sobe DB para GitHub após salvar tipo
             _upload_db_catalogo("Atualiza catálogo de Tipos (salvar individual)")
         except Exception as e:
             st.error("Falha ao salvar tipo.")
             st.exception(e)
         finally:
-            st.session_state["tipo_form_reset"] += 1  # força recriar widgets "limpos"
+            st.session_state["tipo_form_reset"] += 1
 
     with colA:
-        # Formulário individual
         suffix = st.session_state["tipo_form_reset"]
         st.text_input(
             "Novo tipo / atualizar por nome",
@@ -648,25 +619,12 @@ with tabs[2]:
         )
         st.button("Salvar tipo de procedimento", on_click=_save_tipo_and_reset)
 
-        # Cadastro em lote (um por linha)
         st.markdown("##### Cadastrar vários tipos (em lote)")
         bulk_suffix = st.session_state["tipo_bulk_reset"]
         st.caption("Informe um tipo por linha. Ex.: Consulta\\nECG\\nRaio-X")
-        st.text_area(
-            "Tipos (um por linha)",
-            height=120,
-            key=f"tipo_bulk_input_{bulk_suffix}"
-        )
-        st.number_input(
-            "Ordem inicial (auto-incrementa para cada linha)",
-            min_value=0, value=next_tipo_ordem, step=1,
-            key=f"tipo_bulk_ordem_{bulk_suffix}"
-        )
-        st.checkbox(
-            "Ativo (padrão para todos)",
-            value=True,
-            key=f"tipo_bulk_ativo_{bulk_suffix}"
-        )
+        st.text_area("Tipos (um por linha)", height=120, key=f"tipo_bulk_input_{bulk_suffix}")
+        st.number_input("Ordem inicial (auto-incrementa)", min_value=0, value=next_tipo_ordem, step=1, key=f"tipo_bulk_ordem_{bulk_suffix}")
+        st.checkbox("Ativo (padrão)", value=True, key=f"tipo_bulk_ativo_{bulk_suffix}")
 
         def _save_tipos_bulk_and_reset():
             try:
@@ -679,7 +637,6 @@ with tabs[2]:
                 start_ordem = int(st.session_state.get(ordem_key, next_tipo_ordem))
                 ativo_padrao = bool(st.session_state.get(ativo_key, True))
 
-                # nomes únicos, não vazios
                 linhas = [ln.strip() for ln in raw_text.splitlines()]
                 nomes = [ln for ln in linhas if ln]
                 if not nomes:
@@ -704,17 +661,16 @@ with tabs[2]:
                 df3 = pd.DataFrame(tipos_all3, columns=["id", "nome", "ativo", "ordem"]) if tipos_all3 else pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
                 st.session_state["df_tipos_cached"] = df3
 
-                st.success(f"Cadastro em lote concluído. Criados/atualizados: {num_new} | ignorados (vazios/duplicados): {num_skip}")
+                st.success(f"Cadastro em lote concluído. Criados/atualizados: {num_new} | ignorados: {num_skip}")
                 prox_id = (df3["id"].max() + 1) if not df3.empty else 1
                 st.info(f"Próximo ID previsto: {prox_id}")
 
-                # >>> ALTERAÇÃO: sobe DB para GitHub após salvar tipos em lote
                 _upload_db_catalogo("Atualiza catálogo de Tipos (cadastro em lote)")
             except Exception as e:
                 st.error("Falha no cadastro em lote de tipos.")
                 st.exception(e)
             finally:
-                st.session_state["tipo_bulk_reset"] += 1  # limpa widgets de lote
+                st.session_state["tipo_bulk_reset"] += 1
 
         st.button("Salvar tipos em lote", on_click=_save_tipos_bulk_and_reset)
 
@@ -747,7 +703,6 @@ with tabs[2]:
                         prox_id = (df3["id"].max() + 1) if not df3.empty else 1
                         st.info(f"Próximo ID previsto: {prox_id}")
 
-                        # >>> ALTERAÇÃO: sobe DB para GitHub após aplicar alterações de status
                         _upload_db_catalogo("Atualiza catálogo de Tipos (aplicar alterações)")
                     except Exception as e:
                         st.error("Falha ao aplicar alterações nos tipos.")
@@ -765,7 +720,6 @@ with tabs[2]:
     if "sit_form_reset" not in st.session_state:
         st.session_state["sit_form_reset"] = 0
 
-    # Carrega/cacheia df_sits para calcular next_ordem
     from db import list_cirurgia_situacoes
     df_sits_cached = st.session_state.get("df_sits_cached")
     if df_sits_cached is None:
@@ -800,7 +754,7 @@ with tabs[2]:
                 if ok:
                     st.success("Sincronização automática com GitHub concluída.")
             except Exception as e:
-                st.error("Falha ao sincronizar com GitHub (commit automático).")
+                st.error("Falha ao sincronizar com GitHub.")
                 st.exception(e)
 
     def _save_sit_and_reset():
@@ -838,21 +792,9 @@ with tabs[2]:
 
     with colC:
         suffix = st.session_state["sit_form_reset"]
-        st.text_input(
-            "Nova situação / atualizar por nome",
-            placeholder="Ex.: Realizada, Cancelada, Adiada",
-            key=f"sit_nome_input_{suffix}"
-        )
-        st.number_input(
-            "Ordem (para ordenar listagem)",
-            min_value=0, value=next_sit_ordem, step=1,
-            key=f"sit_ordem_input_{suffix}"
-        )
-        st.checkbox(
-            "Ativo", value=True,
-            key=f"sit_ativo_input_{suffix}"
-        )
-
+        st.text_input("Nova situação / atualizar por nome", placeholder="Ex.: Realizada, Cancelada, Adiada", key=f"sit_nome_input_{suffix}")
+        st.number_input("Ordem (para ordenar listagem)", min_value=0, value=next_sit_ordem, step=1, key=f"sit_ordem_input_{suffix}")
+        st.checkbox("Ativo", value=True, key=f"sit_ativo_input_{suffix}")
         st.button("Salvar situação", on_click=_save_sit_and_reset)
 
     with colD:
@@ -895,15 +837,14 @@ with tabs[2]:
             st.exception(e)
 
 # ====================================================================================
-# 📄 Aba 4: Tipos (Lista) — visualização completa com filtros, paginação e export
+# 📄 Aba 4: Tipos (Lista)
 # ====================================================================================
 with tabs[3]:
     st.subheader("Lista de Tipos de Procedimento")
-    st.caption("Visualize, filtre, busque, ordene e exporte todos os tipos cadastrados (ativos e inativos).")
+    st.caption("Visualize, filtre, busque, ordene e exporte todos os tipos (ativos e inativos).")
 
     from db import list_procedimento_tipos
 
-    # Carrega todos os tipos (ativos e inativos)
     try:
         tipos_all = list_procedimento_tipos(only_active=False)
         df_tipos_full = pd.DataFrame(tipos_all, columns=["id", "nome", "ativo", "ordem"])
@@ -912,7 +853,6 @@ with tabs[3]:
         st.exception(e)
         df_tipos_full = pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
 
-    # ---- Filtros e busca ----
     colF1, colF2, colF3, colF4 = st.columns([1, 1, 1, 2])
     with colF1:
         filtro_status = st.selectbox("Status", options=["Todos", "Ativos", "Inativos"], index=0)
@@ -924,37 +864,26 @@ with tabs[3]:
         busca_nome = st.text_input("Buscar por nome (contém)", value="", placeholder="Ex.: ECG, Consulta...")
 
     df_view = df_tipos_full.copy()
-
-    # Aplica filtro de status
     if filtro_status == "Ativos":
         df_view = df_view[df_view["ativo"] == 1]
     elif filtro_status == "Inativos":
         df_view = df_view[df_view["ativo"] == 0]
-
-    # Busca por nome (case-insensitive, contém)
     if busca_nome.strip():
         termo = busca_nome.strip().lower()
         df_view = df_view[df_view["nome"].astype(str).str.lower().str.contains(termo)]
-
-    # Ordenação
     df_view = df_view.sort_values(by=[ordenar_por], ascending=ordem_cresc, kind="mergesort")
 
-    # ---- Paginação ----
     st.divider()
     st.markdown("#### Resultado")
     total_rows = len(df_view)
     per_page = st.number_input("Linhas por página", min_value=10, max_value=200, value=25, step=5)
     max_page = max(1, (total_rows + per_page - 1) // per_page)
     page = st.number_input("Página", min_value=1, max_value=max_page, value=1, step=1)
-
-    start = (page - 1) * per_page
-    end = start + per_page
+    start, end = (page - 1) * per_page, (page - 1) * per_page + per_page
     df_page = df_view.iloc[start:end].copy()
-
     st.caption(f"Exibindo {len(df_page)} de {total_rows} registro(s) — página {page}/{max_page}")
     st.dataframe(df_page, use_container_width=True)
 
-    # ---- Exportações ----
     st.markdown("#### Exportar")
     colE1, colE2 = st.columns(2)
     with colE1:
@@ -993,12 +922,11 @@ with tabs[3]:
             st.error("Falha ao gerar Excel.")
             st.exception(e)
 
-    # ---- Ajuda/diagnóstico ----
     with st.expander("ℹ️ Ajuda / Diagnóstico", expanded=False):
         st.markdown("""
         - **Status**: escolha **Ativos** para ver apenas os que aparecem na Aba **Cirurgias** (dropdown “Tipo (nome)”).
-        - **Ordenação**: por padrão ordenamos por **ordem** (campo usado para ordenar listagens).
+        - **Ordenação**: por padrão ordenamos por **ordem**.
         - **Busca**: digite parte do nome e pressione Enter.
-        - **Paginação**: ajuste “Linhas por página” conforme necessário para listas grandes.
+        - **Paginação**: ajuste conforme necessário.
         - **Exportar**: baixa exatamente o que está filtrado/ordenado.
         """)
