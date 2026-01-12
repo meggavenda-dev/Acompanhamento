@@ -682,7 +682,7 @@ with tabs[2]:
 
         st.markdown("##### Cadastrar vários tipos (em lote)")
         bulk_suffix = st.session_state["tipo_bulk_reset"]
-        st.caption("Informe um tipo por linha. Ex.: Consulta\nECG\nRaio-X")
+        st.caption("Informe um tipo por linha. Ex.: Consulta\\nECG\\nRaio-X")
         st.text_area("Tipos (um por linha)", height=120, key=f"tipo_bulk_input_{bulk_suffix}")
         st.number_input("Ordem inicial (auto-incrementa)", min_value=0, value=next_tipo_ordem, step=1, key=f"tipo_bulk_ordem_{bulk_suffix}")
         st.checkbox("Ativo (padrão)", value=True, key=f"tipo_bulk_ativo_{bulk_suffix}")
@@ -736,12 +736,11 @@ with tabs[2]:
         st.button("Salvar tipos em lote", on_click=_save_tipos_bulk_and_reset)
 
     with colB:
-        # Ações rápidas: recarregar catálogos de Tipos
+        # Botão de recarregar tipos (cache do grid)
         st.markdown("##### Ações rápidas (Tipos)")
         col_btn_tipos, _ = st.columns([1.5, 2.5])
         with col_btn_tipos:
             if st.button("🔄 Recarregar catálogos de Tipos"):
-                from db import list_procedimento_tipos
                 try:
                     tipos_allX = list_procedimento_tipos(only_active=False)
                     dfX = pd.DataFrame(tipos_allX, columns=["id", "nome", "ativo", "ordem"]) if tipos_allX else pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
@@ -817,7 +816,7 @@ with tabs[2]:
     next_sit_ordem = _next_sit_ordem_from_cache(df_sits_cached)
 
     def _upload_db_situacao(commit_msg: str):
-        if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
+        if GITHUB_SYNC_AVAILABLE AND GITHUB_TOKEN_OK:
             try:
                 ok = upload_db_to_github(
                     owner=GH_OWNER,
@@ -874,12 +873,11 @@ with tabs[2]:
         st.button("Salvar situação", on_click=_save_sit_and_reset)
 
     with colD:
-        # Ações rápidas: recarregar catálogos de Situações
+        # Botão de recarregar situações (cache do grid)
         st.markdown("##### Ações rápidas (Situações)")
         col_btn_sits, _ = st.columns([1.5, 2.5])
         with col_btn_sits:
             if st.button("🔄 Recarregar catálogos de Situações"):
-                from db import list_cirurgia_situacoes
                 try:
                     sits_allX = list_cirurgia_situacoes(only_active=False)
                     dfX = pd.DataFrame(sits_allX, columns=["id", "nome", "ativo", "ordem"]) if sits_allX else pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
@@ -972,7 +970,7 @@ with tabs[3]:
     page = st.number_input("Página", min_value=1, max_value=max_page, value=1, step=1)
     start, end = (page - 1) * per_page, (page - 1) * per_page + per_page
     df_page = df_view.iloc[start:end].copy()
-    st.caption(f"Exibindo {len[df_page]} de {total_rows} registro(s) — página {page}/{max_page}")
+    st.caption(f"Exibindo {len(df_page)} de {total_rows} registro(s) — página {page}/{max_page}")
     st.dataframe(df_page, use_container_width=True)
 
     st.markdown("#### Exportar")
@@ -1016,3 +1014,8 @@ with tabs[3]:
     with st.expander("ℹ️ Ajuda / Diagnóstico", expanded=False):
         st.markdown("""
         - **Status**: escolha **Ativos** para ver apenas os que aparecem na Aba **Cirurgias** (dropdown “Tipo (nome)”).
+        - **Ordenação**: por padrão ordenamos por **ordem**.
+        - **Busca**: digite parte do nome e pressione Enter.
+        - **Paginação**: ajuste conforme necessário.
+        - **Exportar**: baixa exatamente o que está filtrado/ordenado.
+        """)
