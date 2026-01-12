@@ -43,19 +43,25 @@ PROCEDURE_HINTS = {
     "LINFADENECTOMIA", "RECONSTRUÇÃO", "RETOSSIGMOIDECTOMIA", "PLEUROSCOPIA",
 }
 
+# =========================
+# Helpers
+# =========================
 def _strip_accents(s: str) -> str:
+    """Remove acentos para comparações robustas (Prestador, cabeçalhos etc.)."""
     if s is None or pd.isna(s):
         return ""
     s = str(s)
     return "".join(ch for ch in unicodedata.normalize("NFKD", s) if not unicodedata.combining(ch))
 
 def _normalize_prestador(s: str) -> str:
+    """Normaliza prestador removendo acentos e pontuações para facilitar filtro."""
     s = _strip_accents(s).upper()
     for ch in (" ", ".", "-", "_", "/", "\\"):
         s = s.replace(ch, "")
     return s.strip()
 
 def _is_probably_procedure_token(tok) -> bool:
+    """Heurística para diferenciar 'Paciente' de frases técnicas/procedimentos."""
     if tok is None or pd.isna(tok):
         return False
     T = str(tok).upper().strip()
@@ -68,6 +74,7 @@ def _is_probably_procedure_token(tok) -> bool:
     return False
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Normaliza cabeçalhos para evitar KeyError e mapear sinônimos/acento."""
     if df is None or df.empty:
         return df
     df.columns = [str(c).replace("\ufeff", "").strip() for c in df.columns]
@@ -85,6 +92,7 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def _detect_centro(line: str) -> str:
+    """Detecta a seção (Centro Cirúrgico, Hemodinâmica, etc.), acento-insensível."""
     L = _strip_accents(line).upper()
     if "CENTRO CIRURGICO" in L: return "CENTRO CIRURGICO"
     if "HEMODINAMICA" in L: return "HEMODINAMICA"
@@ -92,14 +100,22 @@ def _detect_centro(line: str) -> str:
     return None
 
 def _has_data_header(line: str) -> bool:
-    """Tolerante: identifica o cabeçalho 'Data de Realização :' (variações/acentos)."""
+    """Identifica o cabeçalho 'Data de Realização' de forma tolerante a variações."""
     L = _strip_accents(line).upper()
-    return "DATA DE REALIZA" in L  # pega 'REALIZAÇÃO'/'REALIZACAO' com/sem ':'
+    # Não exigimos ':', nem a palavra inteira 'REALIZAÇÃO': usamos prefixo com acento-insensível
+    return "DATA DE REALIZA" in L
 
 # =========================
 # Parser de texto bruto
 # =========================
 def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
+    """
+    Parser robusto para relatórios (CSV/Texto) exportados:
+    - Atualiza 'Data' APENAS quando encontra o cabeçalho 'Data de Realização'.
+    - Se a data não estiver na mesma linha, busca nas 3 linhas seguintes.
+    - Ignora datas soltas em outras colunas (evita contaminação por 1983).
+    - Captura horários, Atendimento, Paciente (com heurística), Aviso e bloco pós-horário.
+    """
     rows = []
     current_section = None
     current_date_str = None
@@ -111,20 +127,22 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
     lines = text.splitlines()
 
     for idx, line in enumerate(lines):
-        # 1) Atualiza Data APENAS no cabeçalho 'Data de Realização'
+        # 1) Atualiza Data SOMENTE no cabeçalho 'Data de Realização'
         if _has_data_header(line):
             m_date = DATE_RE.search(line)
             if not m_date:
-                # Se não está na mesma linha, procura nas próximas 3 linhas
+                # Se a data estiver quebrada, busca em até 3 linhas abaixo
                 for k in range(1, 4):
                     if idx + k < len(lines):
                         m_date = DATE_RE.search(lines[idx + k])
                         if m_date:
                             break
+            # Se achou, atualiza; caso contrário, mantém a última data válida
             current_date_str = m_date.group(1) if m_date else current_date_str
-            ctx = {k: None for k in ctx}  # novo bloco diário
+            # Início de novo bloco diário → zera contexto
+            ctx = {k: None for k in ctx}
 
-        # 2) Detecta Centro
+        # 2) Detecta Centro/Seção
         centro = _detect_centro(line)
         if centro:
             current_section = centro
@@ -137,7 +155,7 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
         if not tokens:
             continue
 
-        # 4) Ignora cabeçalhos/rodapés
+        # 4) Ignora cabeçalhos/rodapés comuns
         L = _strip_accents(line).upper()
         header_phrases = [
             "HORA", "ATENDIMENTO", "PACIENTE", "CONVENIO", "PRESTADOR",
@@ -182,7 +200,7 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
             if not aviso:
                 aviso = ctx["aviso"]
 
-            # Bloco pós-horário
+            # Bloco pós-horário (Cirurgia, Convênio, Prestador, Anestesista, Tipo, Quarto)
             base_idx = h1 if h1 is not None else h0
             cirurgia     = tokens[base_idx + 1] if base_idx + 1 < len(tokens) else None
             convenio     = tokens[base_idx + 2] if base_idx + 2 < len(tokens) else None
@@ -208,7 +226,7 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
                 "_row_idx": row_idx
             })
 
-            # Contexto
+            # Atualiza contexto
             ctx["atendimento"] = atendimento
             ctx["paciente"] = paciente
             ctx["aviso"] = aviso
@@ -219,7 +237,7 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
             row_idx += 1
             continue
 
-        # 6) Linhas sem horário — herda contexto
+        # 6) Linhas sem horário — herda contexto e registra procedimentos adicionais
         if current_section and any(tok for tok in tokens):
             nonempty = [t for t in tokens if t]
             if len(nonempty) >= 4:
@@ -254,6 +272,12 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
 # Herança CONTROLADA
 # =========================
 def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Herança linha-a-linha por Data, preservando ordem original:
+    - Aplica herança somente quando há Prestador na linha atual.
+    - 'Atendimento' e 'Aviso' herdam se vazios e houver valor anterior no mesmo dia.
+    - 'Paciente' herda apenas se o último paciente conhecido não estiver vazio; caso contrário, mantém em branco.
+    """
     if df is None or df.empty:
         return df
     df = df.copy()
@@ -270,6 +294,7 @@ def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
         last_att = pd.NA
         last_pac = pd.NA
         last_aviso = pd.NA
+
         for i in grp.sort_values("_row_idx").index:
             att = df.at[i, "Atendimento"] if "Atendimento" in df.columns else pd.NA
             pac = df.at[i, "Paciente"] if "Paciente" in df.columns else pd.NA
@@ -300,10 +325,10 @@ def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
 # =========================
 def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
     """
-    Saída: DataFrame final com colunas padronizadas:
+    Lê o arquivo (CSV/Excel/Texto) e retorna DataFrame organizado com colunas:
       Hospital, Ano, Mes, Dia, Data, Atendimento, Paciente, Aviso, Convenio, Prestador, Quarto
     """
-    name = upload.name.lower()
+    name = (getattr(upload, "name", "") or "").lower()
 
     # 1) Ler arquivo
     if name.endswith(".xlsx"):
@@ -313,6 +338,7 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
     elif name.endswith(".csv"):
         try:
             df_in = pd.read_csv(upload, sep=",", encoding="utf-8")
+            # Se não tem estrutura típica de colunas, parseia como texto bruto
             if len(set(EXPECTED_COLS) & set(df_in.columns)) < 6:
                 upload.seek(0)
                 text = upload.read().decode("utf-8", errors="ignore")
@@ -338,6 +364,7 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
     df_in["__att_raw"]   = df_in["Atendimento"]
     df_in["__aviso_raw"] = df_in["Aviso"]
 
+    # Sanitiza SOMENTE o __pac_raw (remove “paciente = cirurgia” / texto técnico)
     def _sanitize_one(pac_val, cir_val):
         pac = "" if pd.isna(pac_val) else str(pac_val).strip()
         cir = "" if pd.isna(cir_val) else str(cir_val).strip()
