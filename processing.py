@@ -71,7 +71,7 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
     rows = []
     current_section = None
     current_date_str = None
-    ctx = {"atendimento": None, "paciente": None, "aviso": None, "hora_inicio": None, "hora_fim": None, "quarto": None}
+    ctx = {"hora_inicio": None}
     row_idx = 0
 
     for line in text.splitlines():
@@ -88,7 +88,7 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
 
         if "Centro Cirurgico" in line or "Centro Cirúrgico" in line:
             current_section = next((kw for kw in SECTION_KEYWORDS if kw in line), None)
-            ctx = {k: None for k in ctx}
+            ctx = {"hora_inicio": None}
             continue
 
         header_phrases = ["Hora", "Atendimento", "Paciente", "Convênio", "Prestador"]
@@ -129,14 +129,14 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
                 "Cirurgia": cirurgia, "Convenio": convenio, "Prestador": prestador,
                 "Anestesista": anest, "Tipo_Anestesia": tipo, "Quarto": quarto, "_row_idx": row_idx
             })
-            ctx.update({"atendimento": atendimento, "paciente": paciente, "aviso": aviso, "hora_inicio": hora_inicio, "quarto": quarto})
+            ctx["hora_inicio"] = hora_inicio
             row_idx += 1
             continue
 
         if current_section and any(t for t in tokens):
             nonempty = [t for t in tokens if t]
             if len(nonempty) >= 4:
-                # CORREÇÃO: Não herda dados de paciente aqui para permitir a lógica de prestador diferente depois
+                # Linha de procedimento extra: deixa campos de paciente vazios para herança controlada
                 rows.append({
                     "Centro": current_section, "Data": current_date_str, "Atendimento": None,
                     "Paciente": None, "Aviso": None, "Hora_Inicio": ctx["hora_inicio"],
@@ -147,9 +147,9 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
                 row_idx += 1
     return pd.DataFrame(rows)
 
-# ===============================================
-# Herança - REPETE SOMENTE SE PRESTADOR DIFERENTE
-# ===============================================
+# ===================================================
+# Herança - TRAVA POR BLOCO E POR MÉDICO
+# ===================================================
 
 def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty: return df
@@ -162,28 +162,37 @@ def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
 
     for _, grp in df.groupby("Data", sort=False):
         last_att, last_pac, last_av = pd.NA, pd.NA, pd.NA
-        last_provider = pd.NA
+        # Conjunto de médicos que já apareceram NESTE bloco cirúrgico
+        medicos_no_bloco = set()
         
         for i in grp.sort_values("_row_idx").index:
-            curr_att, curr_pac, curr_av = df.at[i, "Atendimento"], df.at[i, "Paciente"], df.at[i, "Aviso"]
+            curr_att = df.at[i, "Atendimento"]
+            curr_pac = df.at[i, "Paciente"]
+            curr_av  = df.at[i, "Aviso"]
             curr_prest_raw = df.at[i, "Prestador"]
             curr_prest = str(curr_prest_raw).strip().upper() if pd.notna(curr_prest_raw) else ""
 
-            # Verifica se a linha possui dados nativos
-            has_native_data = pd.notna(curr_att) or pd.notna(curr_pac) or pd.notna(curr_av)
+            # Detecta se a linha traz dados nativos (nova cirurgia ou declaração principal)
+            tem_dados_nativos = pd.notna(curr_att) or pd.notna(curr_pac) or pd.notna(curr_av)
 
-            if not has_native_data:
-                # REGRA: Só herda se o prestador atual for DIFERENTE do prestador da linha anterior
-                if curr_prest != "" and curr_prest != last_provider:
-                    df.at[i, "Atendimento"], df.at[i, "Paciente"], df.at[i, "Aviso"] = last_att, last_pac, last_av
-
-            # Atualiza memória dos dados caso encontre uma linha com dados nativos
-            if has_native_data:
+            if tem_dados_nativos:
+                # Se mudou o Atendimento ou o Aviso, resetamos a lista de médicos (novo bloco)
+                if (curr_att != last_att) or (curr_av != last_av):
+                    medicos_no_bloco = set()
+                
+                # Atualiza memória e marca este médico como "já possui dados"
                 last_att, last_pac, last_av = curr_att, curr_pac, curr_av
-            
-            # Atualiza o último prestador visto para a comparação da próxima linha
-            if curr_prest != "":
-                last_provider = curr_prest
+                if curr_prest != "":
+                    medicos_no_bloco.add(curr_prest)
+            else:
+                # Linha sem dados: Herança controlada
+                # REGRA: Só herda se o médico ATUAL ainda não apareceu neste bloco cirúrgico
+                if curr_prest != "" and curr_prest not in medicos_no_bloco:
+                    df.at[i, "Atendimento"] = last_att
+                    df.at[i, "Paciente"]    = last_pac
+                    df.at[i, "Aviso"]       = last_av
+                    # Marca que este médico já recebeu os dados do bloco
+                    medicos_no_bloco.add(curr_prest)
                 
     return df
 
@@ -208,9 +217,10 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
     df_in = _normalize_columns(df_in)
     if "_row_idx" not in df_in.columns: df_in["_row_idx"] = range(len(df_in))
 
-    # Aplica herança seletiva (somente se mudar o médico)
+    # Aplica herança seletiva (bloqueia repetição para o mesmo médico)
     df = _herdar_por_data_ordem_original(df_in)
 
+    # Filtro final pelos prestadores escolhidos
     target = [_strip_accents(p).strip().upper() for p in prestadores_lista]
     df["Prestador_norm"] = df["Prestador"].apply(lambda x: _strip_accents(x).strip().upper())
     df = df[df["Prestador_norm"].isin(target)].copy()
