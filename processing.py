@@ -110,7 +110,8 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
     """
     Parser robusto para CSV 'bruto' (relatórios exportados),
     lendo linha a linha em ordem original e extraindo campos.
-    Corrigido para não confundir 'Paciente' com 'Cirurgia'.
+    Corrigido para não confundir 'Paciente' com 'Cirurgia' e para não capturar
+    datas internas (ex.: 28/10/1983) como 'Data de Realização'.
     """
     rows = []
     current_section = None
@@ -122,10 +123,17 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
     row_idx = 0
 
     for line in text.splitlines():
-        # Detecta Data em qualquer linha
-        m_date = DATE_RE.search(line)
-        if m_date:
-            current_date_str = m_date.group(1)
+        # =========================
+        # CORREÇÃO: atualiza a data SOMENTE em cabeçalho "Data de Realização"
+        # usando comparação sem acento e em maiúsculas para ser robusto a encoding.
+        # =========================
+        line_noacc = _strip_accents(line).upper()
+        m_date_hdr = DATE_RE.search(line)
+        if ("DATA DE REALIZACAO" in line_noacc) and m_date_hdr:
+            yyyy = int(m_date_hdr.group(1).split("/")[-1])
+            # Guard-rail opcional: aceita apenas anos em intervalo plausível
+            if 2010 <= yyyy <= 2035:
+                current_date_str = m_date_hdr.group(1)
 
         # Tokeniza respeitando aspas
         tokens = next(csv.reader([line]))
@@ -133,9 +141,9 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
         if not tokens:
             continue
 
-        # Detecta seção (reinicia contexto)
-        if "Centro Cirurgico" in line or "Centro Cirúrgico" in line:
-            current_section = next((kw for kw in SECTION_KEYWORDS if kw in line), None)
+        # Detecta seção (reinicia contexto) – accent-insensitive
+        if ("CENTRO CIRUR" in line_noacc):
+            current_section = next((kw for kw in SECTION_KEYWORDS if kw in line_noacc), None)
             ctx = {k: None for k in ctx}
             continue
 
@@ -168,7 +176,7 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
             for i, t in enumerate(tokens):
                 if re.fullmatch(r"\d{7,10}", t):
                     atendimento = t
-                    # Limita a busca do paciente ao intervalo antes do horário (h0 - 2), para não pegar 'Cirurgia'
+                    # Limita a busca do paciente ao intervalo antes do horário (h0 - 2)
                     upper_bound = (h0 - 2) if h0 is not None else len(tokens) - 1
                     if upper_bound >= i + 1:
                         for j in range(i + 1, upper_bound + 1):
