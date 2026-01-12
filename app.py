@@ -73,6 +73,87 @@ with st.sidebar:
     else:
         st.info("GitHub sync desativado (sem token).")
 
+# =======================
+# 🧨 Área de risco (Reset)
+# =======================
+with st.sidebar:
+    st.markdown("---")
+    st.markdown("### 🧨 Área de risco (Reset)")
+    st.caption("Atenção: ações destrutivas. Exporte o Excel para backup antes.")
+
+    confirmar = st.checkbox("Eu entendo que isso **não pode ser desfeito**.")
+    confirma_texto = st.text_input("Digite **RESET** para confirmar:", value="")
+
+    def _sync_after_reset(commit_message: str):
+        if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
+            try:
+                ok = upload_db_to_github(
+                    owner=GH_OWNER,
+                    repo=GH_REPO,
+                    path_in_repo=GH_PATH_IN_REPO,
+                    branch=GH_BRANCH,
+                    local_db_path=DB_PATH,
+                    commit_message=commit_message
+                )
+                if ok:
+                    st.success("Sincronização automática com GitHub concluída.")
+            except Exception as e:
+                st.error("Falha ao sincronizar com GitHub.")
+                st.exception(e)
+
+    can_execute = confirmar and (confirma_texto.strip().upper() == "RESET")
+
+    col_r1, col_r2 = st.columns(2)
+    with col_r1:
+        if st.button("Apagar **PACIENTES** (tabela base)", type="secondary", disabled=not can_execute):
+            try:
+                from db import delete_all_pacientes, vacuum
+                delete_all_pacientes()
+                vacuum()
+                st.success("Pacientes apagados (tabela base).")
+                _sync_after_reset("Reset: apaga pacientes (tabela base)")
+            except Exception as e:
+                st.error("Falha ao apagar pacientes.")
+                st.exception(e)
+
+    with col_r2:
+        if st.button("Apagar **CIRURGIAS**", type="secondary", disabled=not can_execute):
+            try:
+                from db import delete_all_cirurgias, vacuum
+                delete_all_cirurgias()
+                vacuum()
+                st.success("Cirurgias apagadas.")
+                _sync_after_reset("Reset: apaga cirurgias")
+            except Exception as e:
+                st.error("Falha ao apagar cirurgias.")
+                st.exception(e)
+
+    col_r3, col_r4 = st.columns(2)
+    with col_r3:
+        if st.button("Apagar **CATÁLOGOS** (Tipos/Situações)", type="secondary", disabled=not can_execute):
+            try:
+                from db import delete_all_catalogos, vacuum
+                delete_all_catalogos()
+                vacuum()
+                st.success("Catálogos apagados (Tipos/Situações).")
+                _sync_after_reset("Reset: apaga catálogos (tipos/situações)")
+            except Exception as e:
+                st.error("Falha ao apagar catálogos.")
+                st.exception(e)
+
+    with col_r4:
+        if st.button("🗑️ **RESET TOTAL** (apaga arquivo .db)", type="primary", disabled=not can_execute):
+            try:
+                from db import DB_PATH, init_db
+                if os.path.exists(DB_PATH):
+                    os.remove(DB_PATH)
+                init_db()
+                st.success("Banco recriado vazio.")
+                _sync_after_reset("Reset total: recria .db vazio")
+            except Exception as e:
+                st.error("Falha no reset total.")
+                st.exception(e)
+
 # Inicializa DB
 init_db()
 
@@ -85,14 +166,14 @@ HOSPITAL_OPCOES = [
 
 # ---------------- Abas ----------------
 tabs = st.tabs([
-    "📥 Importação & Pacientes",
+    "📥 Importação &amp; Pacientes",
     "🩺 Cirurgias",
-    "📚 Cadastro (Tipos & Situações)",
+    "📚 Cadastro (Tipos &amp; Situações)",
     "📄 Tipos (Lista)"
 ])
 
 # ====================================================================================
-# 📥 Aba 1: Importação & Pacientes
+# 📥 Aba 1: Importação &amp; Pacientes
 # ====================================================================================
 with tabs[0]:
     st.subheader("Pacientes únicos por data, prestador e hospital")
@@ -337,9 +418,9 @@ with tabs[1]:
 
     # Avisos se catálogos estiverem vazios
     if not tipo_nome_list:
-        st.warning("Nenhum **Tipo de Procedimento** ativo encontrado. Cadastre na aba **📚 Cadastro (Tipos & Situações)** e marque como **Ativo**.")
+        st.warning("Nenhum **Tipo de Procedimento** ativo encontrado. Cadastre na aba **📚 Cadastro (Tipos &amp; Situações)** e marque como **Ativo**.")
     if not sit_nome_list:
-        st.warning("Nenhuma **Situação da Cirurgia** ativa encontrada. Cadastre na aba **📚 Cadastro (Tipos & Situações)** e marque como **Ativo**.")
+        st.warning("Nenhuma **Situação da Cirurgia** ativa encontrada. Cadastre na aba **📚 Cadastro (Tipos &amp; Situações)** e marque como **Ativo**.")
 
     # -------- Montar a Lista de Cirurgias com união (Cirurgias + Base) --------
     try:
@@ -578,7 +659,7 @@ with tabs[1]:
         st.exception(e)
 
 # ====================================================================================
-# 📚 Aba 3: Cadastro (Tipos & Situações) — reset counter + ordem auto-incremental + lote
+# 📚 Aba 3: Cadastro (Tipos &amp; Situações) — reset counter + ordem auto-incremental + lote
 # ====================================================================================
 with tabs[2]:
     st.subheader("Catálogos de Tipos de Procedimento e Situações da Cirurgia")
