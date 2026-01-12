@@ -56,6 +56,19 @@ def get_engine():
         )
     return _ENGINE
 
+def dispose_engine():
+    """
+    Fecha/disponibiliza o engine atual e zera o singleton.
+    Necessário para liberar o arquivo do SQLite antes de remover.
+    """
+    global _ENGINE
+    if _ENGINE is not None:
+        try:
+            _ENGINE.dispose()
+        except Exception:
+            pass
+        _ENGINE = None
+
 
 def _ensure_db_file_writable():
     """
@@ -188,6 +201,17 @@ def init_db():
         CREATE UNIQUE INDEX IF NOT EXISTS idx_cirurgia_unica
         ON cirurgias (Hospital, Atendimento, Prestador, Data_Cirurgia);
         """))
+
+
+def reset_db_file():
+    """
+    Fecha conexões, remove o arquivo .db (se existir) e recria toda a estrutura.
+    """
+    dispose_engine()
+    if os.path.exists(DB_PATH):
+        os.remove(DB_PATH)
+    # Recria a estrutura
+    init_db()
 
 
 def _safe_int(val, default: int = 0) -> int:
@@ -640,8 +664,28 @@ def vacuum():
     Executa VACUUM para compactar o arquivo SQLite após operações de DELETE.
     Observação: precisa rodar fora de transação.
     """
-    engine = get_engine()
-    # Executa em AUTOCOMMIT para permitir VACUUM
-    with engine.connect() as conn:
-        conn = conn.execution_options(isolation_level="AUTOCOMMIT")
-        conn.exec_driver_sql("VACUUM")
+    try:
+        eng = get_engine()
+        with eng.connect() as conn:
+            conn = conn.execution_options(isolation_level="AUTOCOMMIT")
+            conn.exec_driver_sql("VACUUM")
+    except Exception:
+        # Fallback: dispose e roda VACUUM num engine temporário
+        dispose_engine()
+        tmp = create_engine(DB_URI, future=True, connect_args={"check_same_thread": False})
+        try:
+            with tmp.connect() as conn2:
+                conn2 = conn2.execution_options(isolation_level="AUTOCOMMIT")
+                conn2.exec_driver_sql("VACUUM")
+        finally:
+            try:
+                tmp.dispose()
+            except Exception:
+                pass
+
+
+def hard_reset_database():
+    """
+    API utilitária para reset total: fecha engine, remove arquivo e recria estrutura.
+    """
+    reset_db_file()
