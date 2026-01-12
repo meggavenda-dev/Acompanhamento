@@ -169,9 +169,9 @@ HOSPITAL_OPCOES = [
 
 # ---------------- Abas ----------------
 tabs = st.tabs([
-    "📥 Importação & Pacientes",
+    "📥 Importação &amp; Pacientes",
     "🩺 Cirurgias",
-    "📚 Cadastro (Tipos & Situações)",
+    "📚 Cadastro (Tipos &amp; Situações)",
     "📄 Tipos (Lista)"
 ])
 
@@ -421,11 +421,13 @@ with tabs[1]:
         sit_nome2id = {}
         sit_id2nome = {}
 
+    # Avisos se catálogos estiverem vazios
     if not tipo_nome_list:
-        st.warning("Nenhum **Tipo de Procedimento** ativo encontrado. Cadastre na aba **📚 Cadastro (Tipos & Situações)** e marque como **Ativo**.")
+        st.warning("Nenhum **Tipo de Procedimento** ativo encontrado. Cadastre na aba **📚 Cadastro (Tipos &amp; Situações)** e marque como **Ativo**.")
     if not sit_nome_list:
-        st.warning("Nenhuma **Situação da Cirurgia** ativa encontrada. Cadastre na aba **📚 Cadastro (Tipos & Situações)** e marque como **Ativo**.")
+        st.warning("Nenhuma **Situação da Cirurgia** ativa encontrada. Cadastre na aba **📚 Cadastro (Tipos &amp; Situações)** e marque como **Ativo**.")
 
+    # -------- Montar a Lista de Cirurgias com união (Cirurgias + Base) --------
     try:
         rows_cir = list_cirurgias(hospital=hosp_cad, ano_mes=None, prestador=None)
         df_cir = pd.DataFrame(rows_cir, columns=[
@@ -442,6 +444,7 @@ with tabs[1]:
                 "Observacoes", "created_at", "updated_at"
             ])
 
+        # Prepara nomes legíveis a partir dos IDs para linhas existentes
         df_cir["Fonte"] = "Cirurgia"
         df_cir["Tipo (nome)"] = df_cir["Procedimento_Tipo_ID"].map(tipo_id2nome).fillna("")
         df_cir["Situação (nome)"] = df_cir["Situacao_ID"].map(sit_id2nome).fillna("")
@@ -469,6 +472,7 @@ with tabs[1]:
                 st.markdown("- Deixe **Prestadores** vazio para não filtrar.")
                 st.markdown("- O filtro aceita datas em `dd/MM/yyyy` e `YYYY-MM-DD`.")
 
+        # Mapeia candidatos da base para o esquema de cirurgias (com colunas legíveis)
         df_base_mapped = pd.DataFrame({
             "id": [None]*len(df_base),
             "Hospital": df_base["Hospital"],
@@ -477,8 +481,8 @@ with tabs[1]:
             "Prestador": df_base["Prestador"],
             "Data_Cirurgia": df_base["Data"],
             "Convenio": df_base["Convenio"],
-            "Procedimento_Tipo_ID": [None]*len(df_base),
-            "Situacao_ID": [None]*len(df_base),
+            "Procedimento_Tipo_ID": [None]*len(df_base),  # será preenchido ao salvar
+            "Situacao_ID": [None]*len(df_base),           # idem
             "Guia_AMHPTISS": ["" for _ in range(len(df_base))],
             "Guia_AMHPTISS_Complemento": ["" for _ in range(len(df_base))],
             "Fatura": ["" for _ in range(len(df_base))],
@@ -486,12 +490,15 @@ with tabs[1]:
             "created_at": [None]*len(df_base),
             "updated_at": [None]*len(df_base),
             "Fonte": ["Base"]*len(df_base),
-            "Tipo (nome)": ["" for _ in range(len(df_base))],
-            "Situação (nome)": ["" for _ in range(len(df_base))]
+            "Tipo (nome)": ["" for _ in range(len(df_base))],       # edição por nome
+            "Situação (nome)": ["" for _ in range(len(df_base))]    # edição por nome
         })
 
+        # União preferindo registros já existentes (evita duplicar mesma chave)
         df_union = pd.concat([df_cir, df_base_mapped], ignore_index=True)
         df_union["_has_id"] = df_union["id"].notna().astype(int)
+
+        # Chave resiliente: usa Atendimento; se vazio, usa Paciente
         df_union["_AttOrPac"] = df_union["Atendimento"].fillna("").astype(str).str.strip()
         empty_mask = df_union["_AttOrPac"] == ""
         df_union.loc[empty_mask, "_AttOrPac"] = df_union.loc[empty_mask, "Paciente"].fillna("").astype(str).str.strip()
@@ -504,6 +511,7 @@ with tabs[1]:
         st.markdown("#### Lista de Cirurgias (com pacientes carregados da base)")
         st.caption("Edite diretamente no grid. Selecione **Tipo (nome)** e **Situação (nome)**; ao salvar, o app preenche os IDs correspondentes.")
 
+        # 👇 Oculta colunas ID/Fonte, numéricas e auditoria na visão do editor
         df_edit_view = df_union.drop(
             columns=["id", "Fonte", "Procedimento_Tipo_ID", "Situacao_ID", "created_at", "updated_at"],
             errors="ignore"
@@ -520,14 +528,18 @@ with tabs[1]:
                 "Prestador": st.column_config.TextColumn(),
                 "Data_Cirurgia": st.column_config.TextColumn(help="Formato livre, ex.: dd/MM/yyyy ou YYYY-MM-DD."),
                 "Convenio": st.column_config.TextColumn(),
+
+                # ✅ Dropdown com os Tipos de serviço (ativos e ordenados)
                 "Tipo (nome)": st.column_config.SelectboxColumn(
                     options=[""] + tipo_nome_list,
                     help="Selecione o tipo de serviço cadastrado (apenas ativos)."
                 ),
+                # ✅ Dropdown com as Situações (ativas e ordenadas)
                 "Situação (nome)": st.column_config.SelectboxColumn(
                     options=[""] + sit_nome_list,
                     help="Selecione a situação da cirurgia (apenas ativas)."
                 ),
+
                 "Guia_AMHPTISS": st.column_config.TextColumn(),
                 "Guia_AMHPTISS_Complemento": st.column_config.TextColumn(),
                 "Fatura": st.column_config.TextColumn(),
@@ -543,6 +555,8 @@ with tabs[1]:
             if st.button("💾 Salvar alterações da Lista (UPSERT em massa)"):
                 try:
                     edited_df = edited_df.copy()
+
+                    # Reconstroi IDs a partir dos nomes escolhidos
                     edited_df["Procedimento_Tipo_ID"] = edited_df["Tipo (nome)"].map(lambda n: tipo_nome2id.get(n) if n else None)
                     edited_df["Situacao_ID"] = edited_df["Situação (nome)"].map(lambda n: sit_nome2id.get(n) if n else None)
 
@@ -550,14 +564,16 @@ with tabs[1]:
                     for _, r in edited_df.iterrows():
                         h = str(r.get("Hospital", "")).strip()
                         att = str(r.get("Atendimento", "")).strip()
+                        pac = str(r.get("Paciente", "")).strip()
                         p = str(r.get("Prestador", "")).strip()
                         d = str(r.get("Data_Cirurgia", "")).strip()
 
-                        if h and p and d and (att or str(r.get("Paciente", "")).strip()):
+                        # ✅ Chave mínima (resiliente): Hospital, Prestador, Data_Cirurgia e (Atendimento OU Paciente)
+                        if h and p and d and (att or pac):
                             payload = {
                                 "Hospital": h,
-                                "Atendimento": att,
-                                "Paciente": str(r.get("Paciente", "")).strip(),
+                                "Atendimento": att,  # pode ser vazio
+                                "Paciente": pac,     # pode ser vazio
                                 "Prestador": p,
                                 "Data_Cirurgia": d,
                                 "Convenio": str(r.get("Convenio", "")).strip(),
@@ -590,6 +606,9 @@ with tabs[1]:
                             st.error("Falha ao sincronizar com GitHub.")
                             st.exception(e)
 
+                    # (Opcional) Recarregar para refletir após salvar:
+                    # st.rerun()
+
                 except Exception as e:
                     st.error("Falha ao salvar alterações da lista.")
                     st.exception(e)
@@ -597,6 +616,7 @@ with tabs[1]:
         with colG2:
             if st.button("⬇️ Exportar Excel (Lista atual)"):
                 try:
+                    from export import to_formatted_excel_cirurgias
                     export_df = edited_df.drop(columns=["Tipo (nome)", "Situação (nome)"], errors="ignore")
                     # ✅ Garantir DataFrame na exportação
                     export_df = pd.DataFrame(export_df)
@@ -651,7 +671,7 @@ with tabs[1]:
         st.exception(e)
 
 # ====================================================================================
-# 📚 Aba 3: Cadastro (Tipos & Situações)
+# 📚 Aba 3: Cadastro (Tipos &amp; Situações)
 # ====================================================================================
 with tabs[2]:
     st.subheader("Catálogos de Tipos de Procedimento e Situações da Cirurgia")
@@ -788,6 +808,7 @@ with tabs[2]:
         st.button("Salvar tipos em lote", on_click=_save_tipos_bulk_and_reset)
 
     with colB:
+        # Botão de recarregar tipos (cache do grid)
         st.markdown("##### Ações rápidas (Tipos)")
         col_btn_tipos, _ = st.columns([1.5, 2.5])
         with col_btn_tipos:
@@ -919,6 +940,7 @@ with tabs[2]:
         st.button("Salvar situação", on_click=_save_sit_and_reset)
 
     with colD:
+        # Botão de recarregar situações (cache do grid)
         st.markdown("##### Ações rápidas (Situações)")
         col_btn_sits, _ = st.columns([1.5, 2.5])
         with col_btn_sits:
