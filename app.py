@@ -169,9 +169,9 @@ HOSPITAL_OPCOES = [
 
 # ---------------- Abas ----------------
 tabs = st.tabs([
-    "📥 Importação &amp; Pacientes",
+    "📥 Importação & Pacientes",
     "🩺 Cirurgias",
-    "📚 Cadastro (Tipos &amp; Situações)",
+    "📚 Cadastro (Tipos & Situações)",
     "📄 Tipos (Lista)"
 ])
 
@@ -651,17 +651,416 @@ with tabs[1]:
         st.exception(e)
 
 # ====================================================================================
-# 📚 Aba 3: Cadastro (Tipos & Situações) — (sem mudanças funcionais aqui)
+# 📚 Aba 3: Cadastro (Tipos & Situações)
 # ====================================================================================
 with tabs[2]:
-    # ... (seu código desta aba permanece igual)
-    # Nenhuma alteração necessária para o problema reportado
-    pass
+    st.subheader("Catálogos de Tipos de Procedimento e Situações da Cirurgia")
+
+    st.markdown("#### Tipos de Procedimento")
+    colA, colB = st.columns([2, 1])
+
+    if "tipo_form_reset" not in st.session_state:
+        st.session_state["tipo_form_reset"] = 0
+    if "tipo_bulk_reset" not in st.session_state:
+        st.session_state["tipo_bulk_reset"] = 0
+
+    from db import list_procedimento_tipos
+    df_tipos_cached = st.session_state.get("df_tipos_cached")
+    if df_tipos_cached is None:
+        tipos_all = list_procedimento_tipos(only_active=False)
+        if tipos_all:
+            df_tipos_cached = pd.DataFrame(tipos_all, columns=["id", "nome", "ativo", "ordem"])
+        else:
+            df_tipos_cached = pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
+        st.session_state["df_tipos_cached"] = df_tipos_cached
+
+    def _next_ordem_from_cache(df: pd.DataFrame) -> int:
+        if df.empty or "ordem" not in df.columns:
+            return 1
+        try:
+            return int(pd.to_numeric(df["ordem"], errors="coerce").max() or 0) + 1
+        except Exception:
+            return 1
+
+    next_tipo_ordem = _next_ordem_from_cache(df_tipos_cached)
+
+    def _upload_db_catalogo(commit_msg: str):
+        if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
+            try:
+                ok = upload_db_to_github(
+                    owner=GH_OWNER,
+                    repo=GH_REPO,
+                    path_in_repo=GH_PATH_IN_REPO,
+                    branch=GH_BRANCH,
+                    local_db_path=DB_PATH,
+                    commit_message=commit_msg
+                )
+                if ok:
+                    st.success("Sincronização automática com GitHub concluída.")
+            except Exception as e:
+                st.error("Falha ao sincronizar com GitHub.")
+                st.exception(e)
+
+    def _save_tipo_and_reset():
+        try:
+            suffix = st.session_state["tipo_form_reset"]
+            tipo_nome = (st.session_state.get(f"tipo_nome_input_{suffix}") or "").strip()
+            if not tipo_nome:
+                st.warning("Informe um nome de Tipo antes de salvar.")
+                return
+            tipo_ordem = int(st.session_state.get(f"tipo_ordem_input_{suffix}", next_tipo_ordem))
+            tipo_ativo = bool(st.session_state.get(f"tipo_ativo_input_{suffix}", True))
+
+            from db import upsert_procedimento_tipo, list_procedimento_tipos
+            tid = upsert_procedimento_tipo(tipo_nome, int(tipo_ativo), int(tipo_ordem))
+            st.success(f"Tipo salvo (id={tid}).")
+
+            tipos_all2 = list_procedimento_tipos(only_active=False)
+            df2 = pd.DataFrame(tipos_all2, columns=["id", "nome", "ativo", "ordem"]) if tipos_all2 else pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
+            st.session_state["df_tipos_cached"] = df2
+
+            prox_id = (df2["id"].max() + 1) if not df2.empty else 1
+            st.info(f"Próximo ID previsto: {prox_id}")
+
+            _upload_db_catalogo("Atualiza catálogo de Tipos (salvar individual)")
+        except Exception as e:
+            st.error("Falha ao salvar tipo.")
+            st.exception(e)
+        finally:
+            st.session_state["tipo_form_reset"] += 1
+
+    with colA:
+        suffix = st.session_state["tipo_form_reset"]
+        st.text_input("Novo tipo / atualizar por nome", placeholder="Ex.: Colecistectomia", key=f"tipo_nome_input_{suffix}")
+        st.number_input("Ordem (para ordenar listagem)", min_value=0, value=next_tipo_ordem, step=1, key=f"tipo_ordem_input_{suffix}")
+        st.checkbox("Ativo", value=True, key=f"tipo_ativo_input_{suffix}")
+        st.button("Salvar tipo de procedimento", on_click=_save_tipo_and_reset)
+
+        st.markdown("##### Cadastrar vários tipos (em lote)")
+        bulk_suffix = st.session_state["tipo_bulk_reset"]
+        st.caption("Informe um tipo por linha. Ex.: Consulta\nECG\nRaio-X")
+        st.text_area("Tipos (um por linha)", height=120, key=f"tipo_bulk_input_{bulk_suffix}")
+        st.number_input("Ordem inicial (auto-incrementa)", min_value=0, value=next_tipo_ordem, step=1, key=f"tipo_bulk_ordem_{bulk_suffix}")
+        st.checkbox("Ativo (padrão)", value=True, key=f"tipo_bulk_ativo_{bulk_suffix}")
+
+        def _save_tipos_bulk_and_reset():
+            try:
+                suffix = st.session_state["tipo_bulk_reset"]
+                raw_text = st.session_state.get(f"tipo_bulk_input_{suffix}", "") or ""
+                start_ordem = int(st.session_state.get(f"tipo_bulk_ordem_{suffix}", next_tipo_ordem))
+                ativo_padrao = bool(st.session_state.get(f"tipo_bulk_ativo_{suffix}", True))
+
+                linhas = [ln.strip() for ln in raw_text.splitlines()]
+                nomes = [ln for ln in linhas if ln]
+                if not nomes:
+                    st.warning("Nada a cadastrar: informe ao menos um nome de tipo.")
+                    return
+
+                from db import upsert_procedimento_tipo, list_procedimento_tipos
+                num_new, num_skip = 0, 0
+                vistos = set()
+                for i, nome in enumerate(nomes):
+                    if nome.lower() in vistos:
+                        num_skip += 1
+                        continue
+                    vistos.add(nome.lower())
+                    try:
+                        upsert_procedimento_tipo(nome, int(ativo_padrao), start_ordem + i)
+                        num_new += 1
+                    except Exception:
+                        num_skip += 1
+
+                tipos_all3 = list_procedimento_tipos(only_active=False)
+                df3 = pd.DataFrame(tipos_all3, columns=["id", "nome", "ativo", "ordem"]) if tipos_all3 else pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
+                st.session_state["df_tipos_cached"] = df3
+
+                st.success(f"Cadastro em lote concluído. Criados/atualizados: {num_new} | ignorados: {num_skip}")
+                prox_id = (df3["id"].max() + 1) if not df3.empty else 1
+                st.info(f"Próximo ID previsto: {prox_id}")
+
+                _upload_db_catalogo("Atualiza catálogo de Tipos (cadastro em lote)")
+            except Exception as e:
+                st.error("Falha no cadastro em lote de tipos.")
+                st.exception(e)
+            finally:
+                st.session_state["tipo_bulk_reset"] += 1
+
+        st.button("Salvar tipos em lote", on_click=_save_tipos_bulk_and_reset)
+
+    with colB:
+        st.markdown("##### Ações rápidas (Tipos)")
+        col_btn_tipos, _ = st.columns([1.5, 2.5])
+        with col_btn_tipos:
+            if st.button("🔄 Recarregar catálogos de Tipos"):
+                try:
+                    tipos_allX = list_procedimento_tipos(only_active=False)
+                    dfX = pd.DataFrame(tipos_allX, columns=["id", "nome", "ativo", "ordem"]) if tipos_allX else pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
+                    st.session_state["df_tipos_cached"] = dfX
+                    st.success("Tipos recarregados com sucesso.")
+                except Exception as e:
+                    st.error("Falha ao recarregar tipos.")
+                    st.exception(e)
+
+        from db import set_procedimento_tipo_status
+        try:
+            df_tipos = st.session_state.get("df_tipos_cached", pd.DataFrame(columns=["id", "nome", "ativo", "ordem"]))
+            if not df_tipos.empty:
+                st.data_editor(
+                    df_tipos,
+                    use_container_width=True,
+                    column_config={
+                        "id": st.column_config.NumberColumn(disabled=True),
+                        "nome": st.column_config.TextColumn(disabled=True),
+                        "ordem": st.column_config.NumberColumn(),
+                        "ativo": st.column_config.CheckboxColumn(),
+                    },
+                    key="editor_tipos_proc"
+                )
+                if st.button("Aplicar alterações nos tipos"):
+                    try:
+                        for _, r in df_tipos.iterrows():
+                            set_procedimento_tipo_status(int(r["id"]), int(r["ativo"]))
+                        st.success("Tipos atualizados.")
+
+                        tipos_all3 = list_procedimento_tipos(only_active=False)
+                        df3 = pd.DataFrame(tipos_all3, columns=["id", "nome", "ativo", "ordem"]) if tipos_all3 else pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
+                        st.session_state["df_tipos_cached"] = df3
+
+                        prox_id = (df3["id"].max() + 1) if not df3.empty else 1
+                        st.info(f"Próximo ID previsto: {prox_id}")
+
+                        _upload_db_catalogo("Atualiza catálogo de Tipos (aplicar alterações)")
+                    except Exception as e:
+                        st.error("Falha ao aplicar alterações nos tipos.")
+                        st.exception(e)
+            else:
+                st.info("Nenhum tipo cadastrado ainda.")
+        except Exception as e:
+            st.error("Erro ao listar/editar tipos.")
+            st.exception(e)
+
+    # --------- Situações da Cirurgia -----------
+    st.markdown("#### Situações da Cirurgia")
+    colC, colD = st.columns([2, 1])
+
+    if "sit_form_reset" not in st.session_state:
+        st.session_state["sit_form_reset"] = 0
+
+    from db import list_cirurgia_situacoes
+    df_sits_cached = st.session_state.get("df_sits_cached")
+    if df_sits_cached is None:
+        sits_all = list_cirurgia_situacoes(only_active=False)
+        if sits_all:
+            df_sits_cached = pd.DataFrame(sits_all, columns=["id", "nome", "ativo", "ordem"])
+        else:
+            df_sits_cached = pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
+        st.session_state["df_sits_cached"] = df_sits_cached
+
+    def _next_sit_ordem_from_cache(df: pd.DataFrame) -> int:
+        if df.empty or "ordem" not in df.columns:
+            return 1
+        try:
+            return int(pd.to_numeric(df["ordem"], errors="coerce").max() or 0) + 1
+        except Exception:
+            return 1
+
+    next_sit_ordem = _next_sit_ordem_from_cache(df_sits_cached)
+
+    def _upload_db_situacao(commit_msg: str):
+        if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
+            try:
+                ok = upload_db_to_github(
+                    owner=GH_OWNER,
+                    repo=GH_REPO,
+                    path_in_repo=GH_PATH_IN_REPO,
+                    branch=GH_BRANCH,
+                    local_db_path=DB_PATH,
+                    commit_message=commit_msg
+                )
+                if ok:
+                    st.success("Sincronização automática com GitHub concluída.")
+            except Exception as e:
+                st.error("Falha ao sincronizar com GitHub.")
+                st.exception(e)
+
+    def _save_sit_and_reset():
+        try:
+            suffix = st.session_state["sit_form_reset"]
+            sit_nome = (st.session_state.get(f"sit_nome_input_{suffix}") or "").strip()
+            if not sit_nome:
+                st.warning("Informe um nome de Situação antes de salvar.")
+                return
+            sit_ordem = int(st.session_state.get(f"sit_ordem_input_{suffix}", next_sit_ordem))
+            sit_ativo = bool(st.session_state.get(f"sit_ativo_input_{suffix}", True))
+
+            from db import upsert_cirurgia_situacao, list_cirurgia_situacoes
+            sid = upsert_cirurgia_situacao(sit_nome, int(sit_ativo), int(sit_ordem))
+            st.success(f"Situação salva (id={sid}).")
+
+            sits_all2 = list_cirurgia_situacoes(only_active=False)
+            df2 = pd.DataFrame(sits_all2, columns=["id", "nome", "ativo", "ordem"]) if sits_all2 else pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
+            st.session_state["df_sits_cached"] = df2
+
+            prox_id_s = (df2["id"].max() + 1) if not df2.empty else 1
+            st.info(f"Próximo ID previsto: {prox_id_s}")
+
+            _upload_db_situacao("Atualiza catálogo de Situações (salvar individual)")
+        except Exception as e:
+            st.error("Falha ao salvar situação.")
+            st.exception(e)
+        finally:
+            st.session_state["sit_form_reset"] += 1
+
+    with colC:
+        suffix = st.session_state["sit_form_reset"]
+        st.text_input("Nova situação / atualizar por nome", placeholder="Ex.: Realizada, Cancelada, Adiada", key=f"sit_nome_input_{suffix}")
+        st.number_input("Ordem (para ordenar listagem)", min_value=0, value=next_sit_ordem, step=1, key=f"sit_ordem_input_{suffix}")
+        st.checkbox("Ativo", value=True, key=f"sit_ativo_input_{suffix}")
+        st.button("Salvar situação", on_click=_save_sit_and_reset)
+
+    with colD:
+        st.markdown("##### Ações rápidas (Situações)")
+        col_btn_sits, _ = st.columns([1.5, 2.5])
+        with col_btn_sits:
+            if st.button("🔄 Recarregar catálogos de Situações"):
+                try:
+                    sits_allX = list_cirurgia_situacoes(only_active=False)
+                    dfX = pd.DataFrame(sits_allX, columns=["id", "nome", "ativo", "ordem"]) if sits_allX else pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
+                    st.session_state["df_sits_cached"] = dfX
+                    st.success("Situações recarregadas com sucesso.")
+                except Exception as e:
+                    st.error("Falha ao recarregar situações.")
+                    st.exception(e)
+
+        from db import set_cirurgia_situacao_status
+        try:
+            df_sits = st.session_state.get("df_sits_cached", pd.DataFrame(columns=["id", "nome", "ativo", "ordem"]))
+            if not df_sits.empty:
+                st.data_editor(
+                    df_sits,
+                    use_container_width=True,
+                    column_config={
+                        "id": st.column_config.NumberColumn(disabled=True),
+                        "nome": st.column_config.TextColumn(disabled=True),
+                        "ordem": st.column_config.NumberColumn(),
+                        "ativo": st.column_config.CheckboxColumn(),
+                    },
+                    key="editor_situacoes"
+                )
+                if st.button("Aplicar alterações nas situações"):
+                    try:
+                        for _, r in df_sits.iterrows():
+                            set_cirurgia_situacao_status(int(r["id"]), int(r["ativo"]))
+                        st.success("Situações atualizadas.")
+
+                        sits_all3 = list_cirurgia_situacoes(only_active=False)
+                        df3 = pd.DataFrame(sits_all3, columns=["id", "nome", "ativo", "ordem"]) if sits_all3 else pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
+                        st.session_state["df_sits_cached"] = df3
+
+                        prox_id_s = (df3["id"].max() + 1) if not df3.empty else 1
+                        st.info(f"Próximo ID previsto: {prox_id_s}")
+
+                        _upload_db_situacao("Atualiza catálogo de Situações (aplicar alterações)")
+                    except Exception as e:
+                        st.error("Falha ao aplicar alterações nas situações.")
+                        st.exception(e)
+            else:
+                st.info("Nenhuma situação cadastrada ainda.")
+        except Exception as e:
+            st.error("Erro ao listar/editar situações.")
+            st.exception(e)
 
 # ====================================================================================
-# 📄 Aba 4: Tipos (Lista) — (sem mudanças funcionais aqui)
+# 📄 Aba 4: Tipos (Lista)
 # ====================================================================================
 with tabs[3]:
-    # ... (seu código desta aba permanece igual)
-    pass
+    st.subheader("Lista de Tipos de Procedimento")
+    st.caption("Visualize, filtre, busque, ordene e exporte todos os tipos (ativos e inativos).")
 
+    from db import list_procedimento_tipos
+
+    try:
+        tipos_all = list_procedimento_tipos(only_active=False)
+        df_tipos_full = pd.DataFrame(tipos_all, columns=["id", "nome", "ativo", "ordem"])
+    except Exception as e:
+        st.error("Erro ao carregar tipos do banco.")
+        st.exception(e)
+        df_tipos_full = pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
+
+    colF1, colF2, colF3, colF4 = st.columns([1, 1, 1, 2])
+    with colF1:
+        filtro_status = st.selectbox("Status", options=["Todos", "Ativos", "Inativos"], index=0)
+    with colF2:
+        ordenar_por = st.selectbox("Ordenar por", options=["id", "nome", "ativo", "ordem"], index=3)
+    with colF3:
+        ordem_cresc = st.checkbox("Ordem crescente", value=True)
+    with colF4:
+        busca_nome = st.text_input("Buscar por nome (contém)", value="", placeholder="Ex.: ECG, Consulta...")
+
+    df_view = df_tipos_full.copy()
+    if filtro_status == "Ativos":
+        df_view = df_view[df_view["ativo"] == 1]
+    elif filtro_status == "Inativos":
+        df_view = df_view[df_view["ativo"] == 0]
+    if busca_nome.strip():
+        termo = busca_nome.strip().lower()
+        df_view = df_view[df_view["nome"].astype(str).str.lower().str.contains(termo)]
+    df_view = df_view.sort_values(by=[ordenar_por], ascending=ordem_cresc, kind="mergesort")
+
+    st.divider()
+    st.markdown("#### Resultado")
+    total_rows = len(df_view)
+    per_page = st.number_input("Linhas por página", min_value=10, max_value=200, value=25, step=5)
+    max_page = max(1, (total_rows + per_page - 1) // per_page)
+    page = st.number_input("Página", min_value=1, max_value=max_page, value=1, step=1)
+    start, end = (page - 1) * per_page, (page - 1) * per_page + per_page
+    df_page = df_view.iloc[start:end].copy()
+    st.caption(f"Exibindo {len(df_page)} de {total_rows} registro(s) — página {page}/{max_page}")
+    st.dataframe(df_page, use_container_width=True)
+
+    st.markdown("#### Exportar")
+    colE1, colE2 = st.columns(2)
+    with colE1:
+        csv_bytes = df_view.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="⬇️ Baixar CSV (filtros aplicados)",
+            data=csv_bytes,
+            file_name="tipos_de_procedimento.csv",
+            mime="text/csv"
+        )
+    with colE2:
+        try:
+            from io import BytesIO
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+                df_view.to_excel(writer, sheet_name="Tipos", index=False)
+                wb = writer.book
+                ws = writer.sheets["Tipos"]
+                header_fmt = wb.add_format({"bold": True, "bg_color": "#DCE6F1", "border": 1})
+                for col_num, value in enumerate(df_view.columns):
+                    ws.write(0, col_num, value, header_fmt)
+                last_row = max(len(df_view), 1)
+                ws.autofilter(0, 0, last_row, max(0, len(df_view.columns) - 1))
+                for i, col in enumerate(df_view.columns):
+                    values = [str(x) for x in df_view[col].tolist()]
+                    maxlen = max([len(str(col))] + [len(v) for v in values]) + 2
+                    ws.set_column(i, i, max(14, min(maxlen, 60)))
+            output.seek(0)
+            st.download_button(
+                label="⬇️ Baixar Excel (filtros aplicados)",
+                data=output.getvalue(),
+                file_name="tipos_de_procedimento.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        except Exception as e:
+            st.error("Falha ao gerar Excel.")
+            st.exception(e)
+
+    with st.expander("ℹ️ Ajuda / Diagnóstico", expanded=False):
+        st.markdown("""
+        - **Status**: escolha **Ativos** para ver apenas os que aparecem na Aba **Cirurgias** (dropdown “Tipo (nome)”).
+        - **Ordenação**: por padrão ordenamos por **ordem** e depois por **nome**.
+        - **Busca**: digite parte do nome e pressione Enter.
+        - **Paginação**: ajuste conforme necessário.
+        - **Exportar**: baixa exatamente o que está filtrado/ordenado.
+        """)
