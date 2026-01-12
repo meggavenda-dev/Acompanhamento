@@ -1,4 +1,3 @@
-
 # export.py
 import io
 import re
@@ -31,16 +30,14 @@ def _sanitize_sheet_name(name: str, fallback: str = "Dados") -> str:
 def _write_sheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame):
     """
     Escreve o DataFrame com cabeçalho formatado, autofiltro e ajuste de larguras.
-    - Mantém index=False para planilhas limpas.
-    - Aplica estilo ao cabeçalho.
-    - Cria autofiltro no range completo.
-    - Ajusta larguras de coluna com base no maior conteúdo observado.
     """
+    if df is None or df.empty:
+        return
+
     df = df.copy()
 
     # Converte colunas com objetos complexos em string para evitar erros de escrita
     for c in df.columns:
-        # Garante que tudo que não é escalar/str vire string
         if df[c].dtype == "object":
             df[c] = df[c].apply(lambda x: "" if x is None else str(x))
 
@@ -65,7 +62,7 @@ def _write_sheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame):
     # Ajuste automático de largura com limites razoáveis
     for i, col in enumerate(df.columns):
         valores = [str(x) for x in df[col].tolist()]
-        maxlen = max([len(str(col))] + [len(v) for v in valores]) + 2
+        maxlen = max([len(str(col))] + [len(v) for v in valores if v]) + 2
         ws.set_column(i, i, max(14, min(maxlen, 60)))
 
 
@@ -76,26 +73,36 @@ def to_formatted_excel(
     sheet_name: str = "Pacientes por dia e prestador"
 ) -> io.BytesIO:
     """
-    Gera Excel em memória com:
-    - Cabeçalho formatado
-    - Autofiltro
-    - Largura automática das colunas
+    Gera Excel em memória com proteção contra dados nulos.
     """
     output = io.BytesIO()
+
+    # Validação de tipo para evitar AttributeError
+    if df is None or not isinstance(df, pd.DataFrame):
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            pd.DataFrame({"Aviso": ["Nenhum dado disponível para exportação"]}).to_excel(writer, index=False)
+        output.seek(0)
+        return output
+
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         _write_sheet(writer, _sanitize_sheet_name(sheet_name), df)
+    
     output.seek(0)
     return output
 
 
 def to_formatted_excel_by_hospital(df: pd.DataFrame) -> io.BytesIO:
     """
-    Gera um Excel com uma aba por Hospital.
-    - Normaliza o nome do Hospital
-    - Ordena abas alfabeticamente
-    - Em cada aba, ordena por: Ano, Mes, Dia, Paciente, Prestador (quando existirem)
+    Gera um Excel com uma aba por Hospital. Proteção contra None incluída.
     """
     output = io.BytesIO()
+
+    # Validação de tipo para evitar AttributeError
+    if df is None or not isinstance(df, pd.DataFrame):
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            pd.DataFrame({"Aviso": ["Nenhum dado disponível para exportação"]}).to_excel(writer, index=False)
+        output.seek(0)
+        return output
 
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         if "Hospital" not in df.columns:
@@ -129,12 +136,17 @@ def to_formatted_excel_by_hospital(df: pd.DataFrame) -> io.BytesIO:
 
 def to_formatted_excel_cirurgias(df: pd.DataFrame) -> io.BytesIO:
     """
-    Exporta cirurgias em Excel.
-    - Se houver coluna 'Hospital', cria multi-aba por hospital
-    - Ordena cada aba por Data_Cirurgia e Paciente, quando existirem
-    - Mantém cabeçalho formatado, autofiltro e largura automática
+    Exporta cirurgias em Excel com proteção contra dados nulos.
     """
     output = io.BytesIO()
+
+    # Validação de tipo para evitar AttributeError
+    if df is None or not isinstance(df, pd.DataFrame):
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            pd.DataFrame({"Aviso": ["Nenhum dado disponível para exportação"]}).to_excel(writer, index=False)
+        output.seek(0)
+        return output
+
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         if "Hospital" not in df.columns:
             _write_sheet(writer, "Cirurgias", df)
