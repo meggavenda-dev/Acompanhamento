@@ -46,12 +46,27 @@ def _safe_str(v, default=""):
     return str(v).strip()
 
 # =============================================================================
+# GARANTIA DE ÍNDICES ÚNICOS
+# =============================================================================
+def ensure_unique_indexes():
+    """Cria índices únicos idempotentes para garantir ON CONFLICT funcionando."""
+    engine = get_engine()
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_pacientes_unicos
+            ON pacientes_unicos_por_dia_prestador (Hospital, Atendimento, Paciente, Prestador, Data);
+        """))
+        conn.execute(text("""
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_cirurgias
+            ON cirurgias (Hospital, Atendimento, Paciente, Prestador, Data_Cirurgia);
+        """))
+
+# =============================================================================
 # INIT DB (com UNIQUE constraints)
 # =============================================================================
 def init_db():
     engine = get_engine()
     with engine.begin() as conn:
-        # Pacientes com UNIQUE para permitir UPSERT
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS pacientes_unicos_por_dia_prestador (
             Hospital TEXT,
@@ -68,8 +83,6 @@ def init_db():
             UNIQUE(Hospital, Atendimento, Paciente, Prestador, Data)
         );
         """))
-
-        # Cirurgias com UNIQUE para permitir ON CONFLICT
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS cirurgias (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -90,8 +103,6 @@ def init_db():
             UNIQUE(Hospital, Atendimento, Paciente, Prestador, Data_Cirurgia)
         );
         """))
-
-        # Catálogos
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS procedimento_tipos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -108,6 +119,7 @@ def init_db():
             ordem INTEGER
         );
         """))
+    ensure_unique_indexes()  # garante índices únicos
 
 # =============================================================================
 # RESET / MANUTENÇÃO
@@ -153,6 +165,7 @@ def upsert_dataframe(df):
     if df is None or df.empty: return
     if (df["Paciente"].astype(str).str.strip() == "").any():
         raise ValueError("Existem pacientes vazios — corrija antes de salvar.")
+    ensure_unique_indexes()  # garante índices antes do upsert
     engine = get_engine()
     with engine.begin() as conn:
         for _, r in df.iterrows():
@@ -207,6 +220,7 @@ def list_procedimento_tipos(only_active=True):
         return conn.execute(text(sql)).fetchall()
 
 def upsert_procedimento_tipo(nome, ativo=1, ordem=1):
+    ensure_unique_indexes()
     engine = get_engine()
     nome = _safe_str(nome)
     with engine.begin() as conn:
@@ -231,6 +245,7 @@ def list_cirurgia_situacoes(only_active=True):
         return conn.execute(text(sql)).fetchall()
 
 def upsert_cirurgia_situacao(nome, ativo=1, ordem=1):
+    ensure_unique_indexes()
     engine = get_engine()
     nome = _safe_str(nome)
     with engine.begin() as conn:
@@ -250,6 +265,7 @@ def set_cirurgia_situacao_status(sid, ativo):
 # CIRURGIAS
 # =============================================================================
 def insert_or_update_cirurgia(payload: Dict[str, Any]) -> int:
+    ensure_unique_indexes()
     h = _safe_str(payload.get("Hospital"))
     att = _safe_str(payload.get("Atendimento"), "")
     pac = _safe_str(payload.get("Paciente"), "")
@@ -320,33 +336,3 @@ def delete_cirurgia(cirurgia_id: int):
     engine = get_engine()
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM cirurgias WHERE id=:i"), {"i": int(cirurgia_id)})
-
-# =============================================================================
-# PREFILL
-# =============================================================================
-def find_registros_para_prefill(hospital, ano=None, mes=None, prestadores=None):
-    clauses = ["Hospital=:h"]; params = {"h": hospital}
-    if ano: clauses.append("Ano=:a"); params["a"] = int(ano)
-    if mes: clauses.append("Mes=:m"); params["m"] = int(mes)
-    if prestadores:
-        clauses.append("Prestador IN (" + ",".join([f":p{i}" for i in range(len(prestadores))]) + ")")
-        for i, p in enumerate(prestadores): params[f"p{i}"] = _safe_str(p)
-    sql = f"""
-        SELECT Hospital, Data, Atendimento, Paciente, Convenio, Prestador
-        FROM pacientes_unicos_por_dia_prestador
-        WHERE {" AND ".join(clauses)}
-        ORDER BY Data, Prestador, Atendimento, Paciente
-    """
-    engine = get_engine()
-    with engine.connect() as conn:
-        return conn.execute(text(sql), params).fetchall()
-
-def list_registros_base_all(limit=500):
-    engine = get_engine()
-    with engine.connect() as conn:
-        return conn.execute(text(f"""
-            SELECT Hospital, Data, Atendimento, Paciente, Convenio, Prestador
-            FROM pacientes_unicos_por_dia_prestador
-            ORDER BY Data DESC LIMIT {int(limit)}
-        """)).fetchall()
-
