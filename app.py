@@ -118,18 +118,21 @@ with st.sidebar:
                 st.error("Falha ao apagar pacientes.")
                 st.exception(e)
 
+
     with col_r2:
         if st.button("Apagar **CIRURGIAS**", type="secondary", disabled=not can_execute):
             try:
-                from db import delete_all_cirurgias, vacuum
-                delete_all_cirurgias()
-                vacuum()
-                st.success("Cirurgias apagadas.")
-                _sync_after_reset("Reset: apaga cirurgias")
-                st.rerun()
-            except Exception as e:
-                st.error("Falha ao apagar cirurgias.")
-                st.exception(e)
+            from db import delete_all_cirurgias, vacuum
+            apagadas = delete_all_cirurgias()  # retorna quantas foram removidas
+            vacuum()
+            st.session_state.pop("editor_lista_cirurgias_union", None)  # limpa cache do grid
+            st.success(f"✅ {apagadas} cirurgia(s) apagada(s) do banco.")
+            _sync_after_reset(f"Reset: apaga {apagadas} cirurgias")
+            st.rerun()
+        except Exception as e:
+            st.error("Falha ao apagar cirurgias.")
+            st.exception(e)
+
 
     col_r3, col_r4 = st.columns(2)
     with col_r3:
