@@ -32,6 +32,16 @@ def _write_sheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame):
     """
     Escreve o DataFrame com cabeçalho formatado, autofiltro e ajuste de larguras.
     """
+    if df is None or df.empty:
+        return
+
+    df = df.copy()
+
+    # Converte colunas com objetos complexos em string para evitar erros de escrita
+    for c in df.columns:
+        if df[c].dtype == "object":
+            df[c] = df[c].apply(lambda x: "" if x is None else str(x))
+
     df.to_excel(writer, sheet_name=sheet_name, index=False)
     wb = writer.book
     ws = writer.sheets[sheet_name]
@@ -50,40 +60,56 @@ def _write_sheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame):
     last_row = max(len(df), 1)
     ws.autofilter(0, 0, last_row, max(0, len(df.columns) - 1))
 
-    # Ajuste automático de largura
+    # Ajuste automático de largura com limites razoáveis
     for i, col in enumerate(df.columns):
         valores = [str(x) for x in df[col].tolist()]
-        maxlen = max([len(str(col))] + [len(v) for v in valores]) + 2
-        ws.set_column(i, i, max(14, min(maxlen, 40)))
+        maxlen = max([len(str(col))] + [len(v) for v in valores if v]) + 2
+        ws.set_column(i, i, max(14, min(maxlen, 60)))
 
 
-# ---------------- Exportações ----------------
+# ---------------- Exportações (Pacientes) ----------------
 
 def to_formatted_excel(
     df: pd.DataFrame,
     sheet_name: str = "Pacientes por dia e prestador"
 ) -> io.BytesIO:
     """
-    Gera Excel em memória com:
-    - Cabeçalho formatado
-    - Autofiltro
-    - Largura automática das colunas
+    Gera Excel em memória com proteção contra dados nulos.
     """
     output = io.BytesIO()
+
+    # ✅ Validação e coerção de tipo
+    if df is None or not hasattr(df, "columns"):
+        try:
+            df = pd.DataFrame(df)
+        except Exception:
+            with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+                pd.DataFrame({"Aviso": ["Nenhum dado disponível para exportação"]}).to_excel(writer, index=False)
+            output.seek(0)
+            return output
+
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         _write_sheet(writer, _sanitize_sheet_name(sheet_name), df)
+    
     output.seek(0)
     return output
 
 
 def to_formatted_excel_by_hospital(df: pd.DataFrame) -> io.BytesIO:
     """
-    Gera um Excel com uma aba por Hospital.
-    - Normaliza o nome do Hospital
-    - Ordena abas alfabeticamente
-    - Em cada aba, ordena por: Ano, Mes, Dia, Paciente, Prestador (quando existirem)
+    Gera um Excel com uma aba por Hospital. Proteção contra None incluída.
     """
     output = io.BytesIO()
+
+    # ✅ Validação e coerção de tipo (corrige erro de atributo .columns)
+    if df is None or not hasattr(df, "columns"):
+        try:
+            df = pd.DataFrame(df)
+        except Exception:
+            with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+                pd.DataFrame({"Aviso": ["Nenhum dado disponível para exportação"]}).to_excel(writer, index=False)
+            output.seek(0)
+            return output
 
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         if "Hospital" not in df.columns:
@@ -103,6 +129,53 @@ def to_formatted_excel_by_hospital(df: pd.DataFrame) -> io.BytesIO:
             # Ordena hospitais para gerar abas previsíveis
             for hosp in sorted(df_aux["Hospital"].unique()):
                 dfh = df_aux[df_aux["Hospital"] == hosp].copy()
+                if order_cols:
+                    dfh = dfh.sort_values(order_cols, kind="mergesort")
+
+                sheet_name = _sanitize_sheet_name(hosp, fallback="Sem_Hospital")
+                _write_sheet(writer, sheet_name, dfh)
+
+    output.seek(0)
+    return output
+
+
+# ---------------- Exportações (Cirurgias) ----------------
+
+def to_formatted_excel_cirurgias(df: pd.DataFrame) -> io.BytesIO:
+    """
+    Exporta cirurgias em Excel com proteção contra dados nulos.
+    """
+    output = io.BytesIO()
+
+    # ✅ Validação e coerção de tipo
+    if df is None or not hasattr(df, "columns"):
+        try:
+            df = pd.DataFrame(df)
+        except Exception:
+            with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+                pd.DataFrame({"Aviso": ["Nenhum dado disponível para exportação"]}).to_excel(writer, index=False)
+            output.seek(0)
+            return output
+
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        if "Hospital" not in df.columns:
+            _write_sheet(writer, "Cirurgias", df)
+        else:
+            df_aux = df.copy()
+            df_aux["Hospital"] = (
+                df_aux["Hospital"]
+                .fillna("Sem_Hospital")
+                .astype(str)
+                .str.strip()
+                .replace("", "Sem_Hospital")
+            )
+
+            # Ordena hospitais para gerar abas consistentes
+            for hosp in sorted(df_aux["Hospital"].unique()):
+                dfh = df_aux[df_aux["Hospital"] == hosp].copy()
+
+                # Ordena colunas se existirem
+                order_cols = [c for c in ["Data_Cirurgia", "Paciente"] if c in dfh.columns]
                 if order_cols:
                     dfh = dfh.sort_values(order_cols, kind="mergesort")
 
