@@ -302,7 +302,7 @@ with tabs[1]:
         if st.button("🔄 Recarregar catálogos (Tipos/Situações)"):
             st.session_state["catalog_refresh_ts"] = datetime.now().isoformat(timespec="seconds")
             st.success(f"Catálogos recarregados às {st.session_state['catalog_refresh_ts']}")
-            # O botão dispara um rerun automaticamente.
+            # O próprio botão provoca rerun; os catálogos serão reconsultados abaixo.
 
     with col_refresh_info:
         ts = st.session_state.get("catalog_refresh_ts")
@@ -439,7 +439,7 @@ with tabs[1]:
                 "Prestador": st.column_config.TextColumn(),
                 "Data_Cirurgia": st.column_config.TextColumn(help="Formato livre, ex.: dd/MM/yyyy ou YYYY-MM-DD."),
                 "Convenio": st.column_config.TextColumn(),
-                # ✅ opções vindas do catálogo ativo, ordenadas
+                # opções vindas do catálogo ativo, ordenadas
                 "Tipo (nome)": st.column_config.SelectboxColumn(
                     options=[""] + tipo_nome_list,
                     help="Selecione o tipo de procedimento cadastrado (apenas ativos)."
@@ -472,7 +472,7 @@ with tabs[1]:
                 try:
                     edited_df = edited_df.copy()
 
-                    # ✅ Mapeia nomes selecionados → IDs
+                    # Mapeia nomes selecionados → IDs
                     edited_df["Procedimento_Tipo_ID"] = edited_df["Tipo (nome)"].map(lambda n: tipo_nome2id.get(n) if n else None)
                     edited_df["Situacao_ID"] = edited_df["Situação (nome)"].map(lambda n: sit_nome2id.get(n) if n else None)
 
@@ -816,7 +816,7 @@ with tabs[2]:
     next_sit_ordem = _next_sit_ordem_from_cache(df_sits_cached)
 
     def _upload_db_situacao(commit_msg: str):
-        if GITHUB_SYNC_AVAILABLE AND GITHUB_TOKEN_OK:
+        if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
             try:
                 ok = upload_db_to_github(
                     owner=GH_OWNER,
