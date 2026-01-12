@@ -466,9 +466,9 @@ with tabs[1]:
                     st.exception(e)
 
         with colG2:
-            from export import to_formatted_excel_cirurgias
             if st.button("⬇️ Exportar Excel (Lista atual)"):
                 try:
+                    from export import to_formatted_excel_cirurgias
                     excel_bytes = to_formatted_excel_cirurgias(edited_df.drop(columns=["Tipo (nome)", "Situação (nome)"], errors="ignore"))
                     st.download_button(
                         label="Baixar Cirurgias.xlsx",
@@ -530,13 +530,37 @@ with tabs[2]:
     st.markdown("#### Tipos de Procedimento")
     colA, colB = st.columns([2, 1])
 
+    # Callbacks para limpar formulário após salvar
+    def _clear_tipo_form():
+        st.session_state["tipo_nome_input"] = ""
+        st.session_state["tipo_ordem_input"] = 0
+        st.session_state["tipo_ativo_input"] = True
+
     with colA:
         from db import upsert_procedimento_tipo, list_procedimento_tipos
-        # Inputs com state para poder limpar após salvar
-        tipo_nome = st.text_input("Novo tipo / atualizar por nome", placeholder="Ex.: Colecistectomia", key="tipo_nome_input")
-        tipo_ordem = st.number_input("Ordem (para ordenar listagem)", min_value=0, value=0, step=1, key="tipo_ordem_input")
-        tipo_ativo = st.checkbox("Ativo", value=True, key="tipo_ativo_input")
-        if st.button("Salvar tipo de procedimento"):
+
+        # Inicializa valores de sessão para evitar erros quando a página carrega
+        if "tipo_nome_input" not in st.session_state:
+            st.session_state["tipo_nome_input"] = ""
+        if "tipo_ordem_input" not in st.session_state:
+            st.session_state["tipo_ordem_input"] = 0
+        if "tipo_ativo_input" not in st.session_state:
+            st.session_state["tipo_ativo_input"] = True
+
+        # Widgets vinculados às keys
+        tipo_nome = st.text_input(
+            "Novo tipo / atualizar por nome",
+            placeholder="Ex.: Colecistectomia",
+            key="tipo_nome_input"
+        )
+        tipo_ordem = st.number_input(
+            "Ordem (para ordenar listagem)",
+            min_value=0, value=st.session_state["tipo_ordem_input"], step=1,
+            key="tipo_ordem_input"
+        )
+        tipo_ativo = st.checkbox("Ativo", value=st.session_state["tipo_ativo_input"], key="tipo_ativo_input")
+
+        if st.button("Salvar tipo de procedimento", on_click=_clear_tipo_form):
             try:
                 tid = upsert_procedimento_tipo(tipo_nome.strip(), int(tipo_ativo), int(tipo_ordem))
                 st.success(f"Tipo salvo (id={tid}).")
@@ -545,11 +569,6 @@ with tabs[2]:
                 tipos_all = list_procedimento_tipos(only_active=False)
                 df_tipos = pd.DataFrame(tipos_all, columns=["id", "nome", "ativo", "ordem"])
                 st.session_state["df_tipos_cached"] = df_tipos
-
-                # Limpa campos para próximo cadastro
-                st.session_state["tipo_nome_input"] = ""
-                st.session_state["tipo_ordem_input"] = 0
-                st.session_state["tipo_ativo_input"] = True
 
                 prox_id = (df_tipos["id"].max() + 1) if not df_tipos.empty else 1
                 st.info(f"Próximo ID previsto: {prox_id}")
@@ -607,25 +626,35 @@ with tabs[2]:
     st.markdown("#### Situações da Cirurgia")
     colC, colD = st.columns([2, 1])
 
+    # Callback para limpar formulário de situações
+    def _clear_sit_form():
+        st.session_state["sit_nome_input"] = ""
+        st.session_state["sit_ordem_input"] = 0
+        st.session_state["sit_ativo_input"] = True
+
     with colC:
         from db import upsert_cirurgia_situacao, list_cirurgia_situacoes
+
+        # Inicializa valores
+        if "sit_nome_input" not in st.session_state:
+            st.session_state["sit_nome_input"] = ""
+        if "sit_ordem_input" not in st.session_state:
+            st.session_state["sit_ordem_input"] = 0
+        if "sit_ativo_input" not in st.session_state:
+            st.session_state["sit_ativo_input"] = True
+
         sit_nome = st.text_input("Nova situação / atualizar por nome", placeholder="Ex.: Realizada, Cancelada, Adiada", key="sit_nome_input")
-        sit_ordem = st.number_input("Ordem (para ordenar listagem)", min_value=0, value=0, step=1, key="sit_ordem_input")
-        sit_ativo = st.checkbox("Ativo", value=True, key="sit_ativo_input")
-        if st.button("Salvar situação"):
+        sit_ordem = st.number_input("Ordem (para ordenar listagem)", min_value=0, value=st.session_state["sit_ordem_input"], step=1, key="sit_ordem_input")
+        sit_ativo = st.checkbox("Ativo", value=st.session_state["sit_ativo_input"], key="sit_ativo_input")
+
+        if st.button("Salvar situação", on_click=_clear_sit_form):
             try:
                 sid = upsert_cirurgia_situacao(sit_nome.strip(), int(sit_ativo), int(sit_ordem))
                 st.success(f"Situação salva (id={sid}).")
 
-                # Recarrega e cacheia para o grid
                 sits_all = list_cirurgia_situacoes(only_active=False)
                 df_sits = pd.DataFrame(sits_all, columns=["id", "nome", "ativo", "ordem"])
                 st.session_state["df_sits_cached"] = df_sits
-
-                # Limpa campos para próximo cadastro
-                st.session_state["sit_nome_input"] = ""
-                st.session_state["sit_ordem_input"] = 0
-                st.session_state["sit_ativo_input"] = True
 
                 prox_id_s = (df_sits["id"].max() + 1) if not df_sits.empty else 1
                 st.info(f"Próximo ID previsto: {prox_id_s}")
@@ -650,8 +679,8 @@ with tabs[2]:
                     df_sits,
                     use_container_width=True,
                     column_config={
-                        "id": st.column_config.NumberColumn(disabled=True),   # ID somente leitura
-                        "nome": st.column_config.TextColumn(disabled=True),   # edição do nome via formulário
+                        "id": st.column_config.NumberColumn(disabled=True),
+                        "nome": st.column_config.TextColumn(disabled=True),
                         "ordem": st.column_config.NumberColumn(),
                         "ativo": st.column_config.CheckboxColumn(),
                     },
@@ -663,7 +692,6 @@ with tabs[2]:
                             set_cirurgia_situacao_status(int(r["id"]), int(r["ativo"]))
                         st.success("Situações atualizadas.")
 
-                        # Recarrega e informa próximo ID
                         sits = list_cirurgia_situacoes(only_active=False)
                         df_sits = pd.DataFrame(sits, columns=["id", "nome", "ativo", "ordem"])
                         st.session_state["df_sits_cached"] = df_sits
