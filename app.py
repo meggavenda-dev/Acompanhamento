@@ -112,6 +112,7 @@ with st.sidebar:
                 vacuum()
                 st.success("Pacientes apagados (tabela base).")
                 _sync_after_reset("Reset: apaga pacientes (tabela base)")
+                st.rerun()
             except Exception as e:
                 st.error("Falha ao apagar pacientes.")
                 st.exception(e)
@@ -124,6 +125,7 @@ with st.sidebar:
                 vacuum()
                 st.success("Cirurgias apagadas.")
                 _sync_after_reset("Reset: apaga cirurgias")
+                st.rerun()
             except Exception as e:
                 st.error("Falha ao apagar cirurgias.")
                 st.exception(e)
@@ -137,6 +139,7 @@ with st.sidebar:
                 vacuum()
                 st.success("Catálogos apagados (Tipos/Situações).")
                 _sync_after_reset("Reset: apaga catálogos (tipos/situações)")
+                st.rerun()
             except Exception as e:
                 st.error("Falha ao apagar catálogos.")
                 st.exception(e)
@@ -144,12 +147,12 @@ with st.sidebar:
     with col_r4:
         if st.button("🗑️ **RESET TOTAL** (apaga arquivo .db)", type="primary", disabled=not can_execute):
             try:
-                from db import DB_PATH, init_db
-                if os.path.exists(DB_PATH):
-                    os.remove(DB_PATH)
-                init_db()
+                from db import dispose_engine, reset_db_file
+                dispose_engine()
+                reset_db_file()
                 st.success("Banco recriado vazio.")
                 _sync_after_reset("Reset total: recria .db vazio")
+                st.rerun()
             except Exception as e:
                 st.error("Falha no reset total.")
                 st.exception(e)
@@ -876,7 +879,7 @@ with tabs[2]:
     next_sit_ordem = _next_sit_ordem_from_cache(df_sits_cached)
 
     def _upload_db_situacao(commit_msg: str):
-        if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
+        if GITHUB_SYNC_AVAILABLE AND GITHUB_TOKEN_OK:
             try:
                 ok = upload_db_to_github(
                     owner=GH_OWNER,
