@@ -58,7 +58,12 @@ HOSPITAL_OPCOES = [
 ]
 
 # ---------------- Abas principais ----------------
-tabs = st.tabs(["📥 Importação & Pacientes", "🩺 Cirurgias", "📚 Cadastro (Tipos & Situações)"])
+tabs = st.tabs([
+    "📥 Importação & Pacientes",
+    "🩺 Cirurgias",
+    "📚 Cadastro (Tipos & Situações)",
+    "📄 Tipos (Lista)"  # NOVA ABA
+])
 
 # ====================================================================================
 # 📥 Aba 1: Importação & Pacientes
@@ -630,30 +635,20 @@ with tabs[2]:
                     return
 
                 from db import upsert_procedimento_tipo, list_procedimento_tipos
-                num_new, num_update, num_skip = 0, 0, 0
+                num_new, num_skip = 0, 0
 
-                # Para evitar conflitos por nomes repetidos no texto
                 vistos = set()
                 for i, nome in enumerate(nomes):
                     if nome.lower() in vistos:
                         num_skip += 1
                         continue
                     vistos.add(nome.lower())
-
-                    # upsert por nome (UNIQUE)
                     try:
-                        tid_before = None
-                        # tenta obter id existente (se houver) — opcional
-                        # (poderíamos consultar, mas vamos inferir pelo retorno e contagem)
-                        tid = upsert_procedimento_tipo(nome, int(ativo_padrao), start_ordem + i)
-                        # contagem heurística: se já existia e apenas atualizou, consideramos update
-                        # (como upsert retorna id de qualquer forma, usamos uma estratégia simples)
-                        # Para ser preciso, poderíamos listar antes e checar se nome já existia.
-                        num_new += 1  # contabiliza como novo por simplicidade de UX
+                        upsert_procedimento_tipo(nome, int(ativo_padrao), start_ordem + i)
+                        num_new += 1
                     except Exception:
                         num_skip += 1
 
-                # Recarrega cache
                 tipos_all3 = list_procedimento_tipos(only_active=False)
                 df3 = pd.DataFrame(tipos_all3, columns=["id", "nome", "ativo", "ordem"]) if tipos_all3 else pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
                 st.session_state["df_tipos_cached"] = df3
@@ -816,3 +811,112 @@ with tabs[2]:
         except Exception as e:
             st.error("Erro ao listar/editar situações.")
             st.exception(e)
+
+# ====================================================================================
+# 📄 Aba 4: Tipos (Lista) — visualização completa com filtros, paginação e export
+# ====================================================================================
+with tabs[3]:
+    st.subheader("Lista de Tipos de Procedimento")
+    st.caption("Visualize, filtre, busque, ordene e exporte todos os tipos cadastrados (ativos e inativos).")
+
+    from db import list_procedimento_tipos
+
+    # Carrega todos os tipos (ativos e inativos)
+    try:
+        tipos_all = list_procedimento_tipos(only_active=False)
+        df_tipos_full = pd.DataFrame(tipos_all, columns=["id", "nome", "ativo", "ordem"])
+    except Exception as e:
+        st.error("Erro ao carregar tipos do banco.")
+        st.exception(e)
+        df_tipos_full = pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
+
+    # ---- Filtros e busca ----
+    colF1, colF2, colF3, colF4 = st.columns([1, 1, 1, 2])
+    with colF1:
+        filtro_status = st.selectbox("Status", options=["Todos", "Ativos", "Inativos"], index=0)
+    with colF2:
+        ordenar_por = st.selectbox("Ordenar por", options=["id", "nome", "ativo", "ordem"], index=3)
+    with colF3:
+        ordem_cresc = st.checkbox("Ordem crescente", value=True)
+    with colF4:
+        busca_nome = st.text_input("Buscar por nome (contém)", value="", placeholder="Ex.: ECG, Consulta...")
+
+    df_view = df_tipos_full.copy()
+
+    # Aplica filtro de status
+    if filtro_status == "Ativos":
+        df_view = df_view[df_view["ativo"] == 1]
+    elif filtro_status == "Inativos":
+        df_view = df_view[df_view["ativo"] == 0]
+
+    # Busca por nome (case-insensitive, contém)
+    if busca_nome.strip():
+        termo = busca_nome.strip().lower()
+        df_view = df_view[df_view["nome"].astype(str).str.lower().str.contains(termo)]
+
+    # Ordenação
+    df_view = df_view.sort_values(by=[ordenar_por], ascending=ordem_cresc, kind="mergesort")
+
+    # ---- Paginação ----
+    st.divider()
+    st.markdown("#### Resultado")
+    total_rows = len(df_view)
+    per_page = st.number_input("Linhas por página", min_value=10, max_value=200, value=25, step=5)
+    max_page = max(1, (total_rows + per_page - 1) // per_page)
+    page = st.number_input("Página", min_value=1, max_value=max_page, value=1, step=1)
+
+    start = (page - 1) * per_page
+    end = start + per_page
+    df_page = df_view.iloc[start:end].copy()
+
+    st.caption(f"Exibindo {len(df_page)} de {total_rows} registro(s) — página {page}/{max_page}")
+    st.dataframe(df_page, use_container_width=True)
+
+    # ---- Exportações ----
+    st.markdown("#### Exportar")
+    colE1, colE2 = st.columns(2)
+    with colE1:
+        csv_bytes = df_view.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="⬇️ Baixar CSV (filtros aplicados)",
+            data=csv_bytes,
+            file_name="tipos_de_procedimento.csv",
+            mime="text/csv"
+        )
+    with colE2:
+        try:
+            from io import BytesIO
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+                df_view.to_excel(writer, sheet_name="Tipos", index=False)
+                wb = writer.book
+                ws = writer.sheets["Tipos"]
+                header_fmt = wb.add_format({"bold": True, "bg_color": "#DCE6F1", "border": 1})
+                for col_num, value in enumerate(df_view.columns):
+                    ws.write(0, col_num, value, header_fmt)
+                last_row = max(len(df_view), 1)
+                ws.autofilter(0, 0, last_row, max(0, len(df_view.columns) - 1))
+                for i, col in enumerate(df_view.columns):
+                    values = [str(x) for x in df_view[col].tolist()]
+                    maxlen = max([len(str(col))] + [len(v) for v in values]) + 2
+                    ws.set_column(i, i, max(14, min(maxlen, 60)))
+            output.seek(0)
+            st.download_button(
+                label="⬇️ Baixar Excel (filtros aplicados)",
+                data=output.getvalue(),
+                file_name="tipos_de_procedimento.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        except Exception as e:
+            st.error("Falha ao gerar Excel.")
+            st.exception(e)
+
+    # ---- Ajuda/diagnóstico ----
+    with st.expander("ℹ️ Ajuda / Diagnóstico", expanded=False):
+        st.markdown("""
+        - **Status**: escolha **Ativos** para ver apenas os que aparecem na Aba **Cirurgias** (dropdown “Tipo (nome)”).
+        - **Ordenação**: por padrão ordenamos por **ordem** (campo usado para ordenar listagens).
+        - **Busca**: digite parte do nome e pressione Enter.
+        - **Paginação**: ajuste “Linhas por página” conforme necessário para listas grandes.
+        - **Exportar**: baixa exatamente o que está filtrado/ordenado.
+        """)
