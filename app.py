@@ -337,7 +337,7 @@ with tabs[1]:
             "Atendimento": df_base["Atendimento"],
             "Paciente": df_base["Paciente"],
             "Prestador": df_base["Prestador"],
-            "Data_Cirurgia": df_base["Data"],
+            "Data_Cirurgia": df_base["Data"],  # usa Data como Data_Cirurgia
             "Convenio": df_base["Convenio"],
             "Procedimento_Tipo_ID": [None]*len(df_base),
             "Situacao_ID": [None]*len(df_base),
@@ -355,6 +355,7 @@ with tabs[1]:
         df_union = pd.concat([df_cir, df_base_mapped], ignore_index=True)
         df_union["_has_id"] = df_union["id"].notna().astype(int)
 
+        # Chave resiliente: usa Atendimento; se vazio, usa Paciente
         df_union["_AttOrPac"] = df_union["Atendimento"].fillna("").astype(str).str.strip()
         empty_mask = df_union["_AttOrPac"] == ""
         df_union.loc[empty_mask, "_AttOrPac"] = df_union.loc[empty_mask, "Paciente"].fillna("").astype(str).str.strip()
@@ -380,10 +381,10 @@ with tabs[1]:
                 "Prestador": st.column_config.TextColumn(),
                 "Data_Cirurgia": st.column_config.TextColumn(help="Formato livre, ex.: dd/MM/yyyy ou YYYY-MM-DD."),
                 "Convenio": st.column_config.TextColumn(),
-                "Tipo (nome)": st.column_config.SelectboxColumn(options=[""] + list(tipo_nome2id.keys())),
-                "Situação (nome)": st.column_config.SelectboxColumn(options=[""] + list(sit_nome2id.keys())),
-                "Procedimento_Tipo_ID": st.column_config.NumberColumn(disabled=True),
-                "Situacao_ID": st.column_config.NumberColumn(disabled=True),
+                "Tipo (nome)": st.column_config.SelectboxColumn(options=[""] + list(tipo_nome2id.keys()), help="Selecione o tipo de procedimento."),
+                "Situação (nome)": st.column_config.SelectboxColumn(options=[""] + list(sit_nome2id.keys()), help="Selecione a situação da cirurgia."),
+                "Procedimento_Tipo_ID": st.column_config.NumberColumn(disabled=True, help="Preenchido ao salvar pela seleção de 'Tipo (nome)'."),
+                "Situacao_ID": st.column_config.NumberColumn(disabled=True, help="Preenchido ao salvar pela seleção de 'Situação (nome)'."),
                 "Guia_AMHPTISS": st.column_config.TextColumn(),
                 "Guia_AMHPTISS_Complemento": st.column_config.TextColumn(),
                 "Fatura": st.column_config.TextColumn(),
@@ -504,7 +505,7 @@ with tabs[1]:
         st.exception(e)
 
 # ====================================================================================
-# 📚 Aba 3: Cadastro (Tipos & Situações) — com reset counter para evitar conflitos
+# 📚 Aba 3: Cadastro (Tipos & Situações) — reset counter + ordem auto-incremental
 # ====================================================================================
 with tabs[2]:
     st.subheader("Catálogos de Tipos de Procedimento e Situações da Cirurgia")
@@ -517,7 +518,26 @@ with tabs[2]:
     if "tipo_form_reset" not in st.session_state:
         st.session_state["tipo_form_reset"] = 0
 
-    # Callback que salva e incrementa o reset (limpa widgets sem mexer na session_state das keys)
+    # Carrega/cacheia df_tipos para calcular next_ordem
+    from db import list_procedimento_tipos
+    df_tipos_cached = st.session_state.get("df_tipos_cached")
+    if df_tipos_cached is None:
+        tipos_all = list_procedimento_tipos(only_active=False)
+        if tipos_all:
+            df_tipos_cached = pd.DataFrame(tipos_all, columns=["id", "nome", "ativo", "ordem"])
+        else:
+            df_tipos_cached = pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
+        st.session_state["df_tipos_cached"] = df_tipos_cached
+
+    # Próxima ordem auto-incremental
+    next_tipo_ordem = 1
+    if not df_tipos_cached.empty and "ordem" in df_tipos_cached.columns:
+        try:
+            next_tipo_ordem = int(pd.to_numeric(df_tipos_cached["ordem"], errors="coerce").max() or 0) + 1
+        except Exception:
+            next_tipo_ordem = 1
+
+    # Callback: salva e incrementa reset para limpar widgets
     def _save_tipo_and_reset():
         try:
             suffix = st.session_state["tipo_form_reset"]
@@ -526,40 +546,38 @@ with tabs[2]:
             ativo_key = f"tipo_ativo_input_{suffix}"
 
             tipo_nome = st.session_state.get(nome_key, "").strip()
-            tipo_ordem = int(st.session_state.get(ordem_key, 0))
+            tipo_ordem = int(st.session_state.get(ordem_key, next_tipo_ordem))
             tipo_ativo = bool(st.session_state.get(ativo_key, True))
 
             from db import upsert_procedimento_tipo, list_procedimento_tipos
             tid = upsert_procedimento_tipo(tipo_nome, int(tipo_ativo), int(tipo_ordem))
             st.success(f"Tipo salvo (id={tid}).")
 
-            tipos_all = list_procedimento_tipos(only_active=False)
-            df_tipos = pd.DataFrame(tipos_all, columns=["id", "nome", "ativo", "ordem"])
-            st.session_state["df_tipos_cached"] = df_tipos
+            tipos_all2 = list_procedimento_tipos(only_active=False)
+            df2 = pd.DataFrame(tipos_all2, columns=["id", "nome", "ativo", "ordem"]) if tipos_all2 else pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
+            st.session_state["df_tipos_cached"] = df2
 
-            prox_id = (df_tipos["id"].max() + 1) if not df_tipos.empty else 1
+            prox_id = (df2["id"].max() + 1) if not df2.empty else 1
             st.info(f"Próximo ID previsto: {prox_id}")
-
         except Exception as e:
             st.error("Falha ao salvar tipo.")
             st.exception(e)
         finally:
-            # incrementa reset para criar novas keys de widgets (limpa formulário)
-            st.session_state["tipo_form_reset"] += 1
+            st.session_state["tipo_form_reset"] += 1  # força recriar widgets "limpos"
 
     with colA:
         suffix = st.session_state["tipo_form_reset"]
-        tipo_nome = st.text_input(
+        st.text_input(
             "Novo tipo / atualizar por nome",
             placeholder="Ex.: Colecistectomia",
             key=f"tipo_nome_input_{suffix}"
         )
-        tipo_ordem = st.number_input(
+        st.number_input(
             "Ordem (para ordenar listagem)",
-            min_value=0, value=0, step=1,
+            min_value=0, value=next_tipo_ordem, step=1,
             key=f"tipo_ordem_input_{suffix}"
         )
-        tipo_ativo = st.checkbox(
+        st.checkbox(
             "Ativo", value=True,
             key=f"tipo_ativo_input_{suffix}"
         )
@@ -567,16 +585,9 @@ with tabs[2]:
         st.button("Salvar tipo de procedimento", on_click=_save_tipo_and_reset)
 
     with colB:
-        from db import list_procedimento_tipos, set_procedimento_tipo_status
+        from db import set_procedimento_tipo_status
         try:
-            df_tipos = st.session_state.get("df_tipos_cached")
-            if df_tipos is None:
-                tipos = list_procedimento_tipos(only_active=False)
-                if tipos:
-                    df_tipos = pd.DataFrame(tipos, columns=["id", "nome", "ativo", "ordem"])
-                else:
-                    df_tipos = pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
-
+            df_tipos = st.session_state.get("df_tipos_cached", pd.DataFrame(columns=["id", "nome", "ativo", "ordem"]))
             if not df_tipos.empty:
                 st.data_editor(
                     df_tipos,
@@ -595,12 +606,12 @@ with tabs[2]:
                             set_procedimento_tipo_status(int(r["id"]), int(r["ativo"]))
                         st.success("Tipos atualizados.")
 
-                        tipos = list_procedimento_tipos(only_active=False)
-                        df_tipos = pd.DataFrame(tipos, columns=["id", "nome", "ativo", "ordem"])
-                        st.session_state["df_tipos_cached"] = df_tipos
-                        prox_id = (df_tipos["id"].max() + 1) if not df_tipos.empty else 1
-                        st.info(f"Próximo ID previsto: {prox_id}")
+                        tipos_all3 = list_procedimento_tipos(only_active=False)
+                        df3 = pd.DataFrame(tipos_all3, columns=["id", "nome", "ativo", "ordem"]) if tipos_all3 else pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
+                        st.session_state["df_tipos_cached"] = df3
 
+                        prox_id = (df3["id"].max() + 1) if not df3.empty else 1
+                        st.info(f"Próximo ID previsto: {prox_id}")
                     except Exception as e:
                         st.error("Falha ao aplicar alterações nos tipos.")
                         st.exception(e)
@@ -617,6 +628,24 @@ with tabs[2]:
     if "sit_form_reset" not in st.session_state:
         st.session_state["sit_form_reset"] = 0
 
+    # Carrega/cacheia df_sits para calcular next_ordem
+    from db import list_cirurgia_situacoes
+    df_sits_cached = st.session_state.get("df_sits_cached")
+    if df_sits_cached is None:
+        sits_all = list_cirurgia_situacoes(only_active=False)
+        if sits_all:
+            df_sits_cached = pd.DataFrame(sits_all, columns=["id", "nome", "ativo", "ordem"])
+        else:
+            df_sits_cached = pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
+        st.session_state["df_sits_cached"] = df_sits_cached
+
+    next_sit_ordem = 1
+    if not df_sits_cached.empty and "ordem" in df_sits_cached.columns:
+        try:
+            next_sit_ordem = int(pd.to_numeric(df_sits_cached["ordem"], errors="coerce").max() or 0) + 1
+        except Exception:
+            next_sit_ordem = 1
+
     def _save_sit_and_reset():
         try:
             suffix = st.session_state["sit_form_reset"]
@@ -625,20 +654,19 @@ with tabs[2]:
             ativo_key = f"sit_ativo_input_{suffix}"
 
             sit_nome = st.session_state.get(nome_key, "").strip()
-            sit_ordem = int(st.session_state.get(ordem_key, 0))
+            sit_ordem = int(st.session_state.get(ordem_key, next_sit_ordem))
             sit_ativo = bool(st.session_state.get(ativo_key, True))
 
             from db import upsert_cirurgia_situacao, list_cirurgia_situacoes
             sid = upsert_cirurgia_situacao(sit_nome, int(sit_ativo), int(sit_ordem))
             st.success(f"Situação salva (id={sid}).")
 
-            sits_all = list_cirurgia_situacoes(only_active=False)
-            df_sits = pd.DataFrame(sits_all, columns=["id", "nome", "ativo", "ordem"])
-            st.session_state["df_sits_cached"] = df_sits
+            sits_all2 = list_cirurgia_situacoes(only_active=False)
+            df2 = pd.DataFrame(sits_all2, columns=["id", "nome", "ativo", "ordem"]) if sits_all2 else pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
+            st.session_state["df_sits_cached"] = df2
 
-            prox_id_s = (df_sits["id"].max() + 1) if not df_sits.empty else 1
+            prox_id_s = (df2["id"].max() + 1) if not df2.empty else 1
             st.info(f"Próximo ID previsto: {prox_id_s}")
-
         except Exception as e:
             st.error("Falha ao salvar situação.")
             st.exception(e)
@@ -647,17 +675,17 @@ with tabs[2]:
 
     with colC:
         suffix = st.session_state["sit_form_reset"]
-        sit_nome = st.text_input(
+        st.text_input(
             "Nova situação / atualizar por nome",
             placeholder="Ex.: Realizada, Cancelada, Adiada",
             key=f"sit_nome_input_{suffix}"
         )
-        sit_ordem = st.number_input(
+        st.number_input(
             "Ordem (para ordenar listagem)",
-            min_value=0, value=0, step=1,
+            min_value=0, value=next_sit_ordem, step=1,
             key=f"sit_ordem_input_{suffix}"
         )
-        sit_ativo = st.checkbox(
+        st.checkbox(
             "Ativo", value=True,
             key=f"sit_ativo_input_{suffix}"
         )
@@ -665,16 +693,9 @@ with tabs[2]:
         st.button("Salvar situação", on_click=_save_sit_and_reset)
 
     with colD:
-        from db import list_cirurgia_situacoes, set_cirurgia_situacao_status
+        from db import set_cirurgia_situacao_status
         try:
-            df_sits = st.session_state.get("df_sits_cached")
-            if df_sits is None:
-                sits = list_cirurgia_situacoes(only_active=False)
-                if sits:
-                    df_sits = pd.DataFrame(sits, columns=["id", "nome", "ativo", "ordem"])
-                else:
-                    df_sits = pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
-
+            df_sits = st.session_state.get("df_sits_cached", pd.DataFrame(columns=["id", "nome", "ativo", "ordem"]))
             if not df_sits.empty:
                 st.data_editor(
                     df_sits,
@@ -693,12 +714,12 @@ with tabs[2]:
                             set_cirurgia_situacao_status(int(r["id"]), int(r["ativo"]))
                         st.success("Situações atualizadas.")
 
-                        sits = list_cirurgia_situacoes(only_active=False)
-                        df_sits = pd.DataFrame(sits, columns=["id", "nome", "ativo", "ordem"])
-                        st.session_state["df_sits_cached"] = df_sits
-                        prox_id_s = (df_sits["id"].max() + 1) if not df_sits.empty else 1
-                        st.info(f"Próximo ID previsto: {prox_id_s}")
+                        sits_all3 = list_cirurgia_situacoes(only_active=False)
+                        df3 = pd.DataFrame(sits_all3, columns=["id", "nome", "ativo", "ordem"]) if sits_all3 else pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
+                        st.session_state["df_sits_cached"] = df3
 
+                        prox_id_s = (df3["id"].max() + 1) if not df3.empty else 1
+                        st.info(f"Próximo ID previsto: {prox_id_s}")
                     except Exception as e:
                         st.error("Falha ao aplicar alterações nas situações.")
                         st.exception(e)
