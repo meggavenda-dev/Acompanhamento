@@ -196,10 +196,16 @@ def init_db():
         ON cirurgias (Paciente);
         """))
 
-        # Evita duplicar mesma cirurgia com chave composta (ajuste conforme regra desejada)
+        # Evita duplicar mesma cirurgia com chave composta
         conn.execute(text("""
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_cirurgia_unica
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_cirurgia_unica_att
         ON cirurgias (Hospital, Atendimento, Prestador, Data_Cirurgia);
+        """))
+
+        # ✅ Índice único alternativo quando Atendimento está vazio (usa Paciente)
+        conn.execute(text("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_cirurgia_unica_pac
+        ON cirurgias (Hospital, Paciente, Prestador, Data_Cirurgia);
         """))
 
 
@@ -422,41 +428,64 @@ def set_cirurgia_situacao_status(id_: int, ativo: int):
 # ---------------- Cirurgias (CRUD) ----------------
 def insert_or_update_cirurgia(payload: Dict[str, Any]) -> int:
     """
-    UPSERT por (Hospital, Atendimento, Prestador, Data_Cirurgia).
-    Retorna id da cirurgia.
+    UPSERT resiliente:
+      - Se Atendimento estiver preenchido: chave (Hospital, Atendimento, Prestador, Data_Cirurgia)
+      - Caso contrário: chave (Hospital, Paciente, Prestador, Data_Cirurgia)
+    Normaliza strings vazias para NULL ao gravar (consistência).
     """
     _ensure_db_file_writable()
     engine = get_engine()
-    with engine.begin() as conn:
-        rs = conn.execute(text("""
-            SELECT id FROM cirurgias
-            WHERE Hospital = :h AND Atendimento = :att AND Prestador = :p AND Data_Cirurgia = :d
-        """), {
-            "h": _safe_str(payload.get("Hospital")),
-            "att": _safe_str(payload.get("Atendimento")),
-            "p": _safe_str(payload.get("Prestador")),
-            "d": _safe_str(payload.get("Data_Cirurgia"))
-        })
-        row = rs.fetchone()
 
-        params = {
-            "Hospital": _safe_str(payload.get("Hospital")),
-            "Atendimento": _safe_str(payload.get("Atendimento")),
-            "Paciente": _safe_str(payload.get("Paciente")),
-            "Prestador": _safe_str(payload.get("Prestador")),
-            "Data_Cirurgia": _safe_str(payload.get("Data_Cirurgia")),
-            "Convenio": _safe_str(payload.get("Convenio")),
-            "Procedimento_Tipo_ID": payload.get("Procedimento_Tipo_ID"),
-            "Situacao_ID": payload.get("Situacao_ID"),
-            "Guia_AMHPTISS": _safe_str(payload.get("Guia_AMHPTISS")),
-            "Guia_AMHPTISS_Complemento": _safe_str(payload.get("Guia_AMHPTISS_Complemento")),
-            "Fatura": _safe_str(payload.get("Fatura")),
-            "Observacoes": _safe_str(payload.get("Observacoes")),
-        }
+    # --- Normalização: string vazia -> None (vira NULL no banco)
+    def _norm_or_none(s):
+        s = _safe_str(s)
+        return s if s != "" else None
+
+    h   = _safe_str(payload.get("Hospital"))
+    att = _norm_or_none(payload.get("Atendimento"))
+    pac = _norm_or_none(payload.get("Paciente"))
+    p   = _safe_str(payload.get("Prestador"))
+    d   = _safe_str(payload.get("Data_Cirurgia"))  # TEXT
+
+    params_all = {
+        "Hospital": h,
+        "Atendimento": att,
+        "Paciente": pac,
+        "Prestador": p,
+        "Data_Cirurgia": d,
+        "Convenio": _safe_str(payload.get("Convenio")),
+        "Procedimento_Tipo_ID": payload.get("Procedimento_Tipo_ID"),
+        "Situacao_ID": payload.get("Situacao_ID"),
+        "Guia_AMHPTISS": _safe_str(payload.get("Guia_AMHPTISS")),
+        "Guia_AMHPTISS_Complemento": _safe_str(payload.get("Guia_AMHPTISS_Complemento")),
+        "Fatura": _safe_str(payload.get("Fatura")),
+        "Observacoes": _safe_str(payload.get("Observacoes")),
+    }
+
+    with engine.begin() as conn:
+        row = None
+
+        # 1) Se tem Atendimento, tenta por ele (tratando NULL de ambos lados)
+        if att is not None:
+            row = conn.execute(text("""
+                SELECT id FROM cirurgias
+                WHERE Hospital = :h AND Prestador = :p AND Data_Cirurgia = :d
+                  AND (Atendimento = :att OR (Atendimento IS NULL AND :att IS NULL))
+            """), {"h": h, "p": p, "d": d, "att": att}).fetchone()
+
+        # 2) Se não achou e há Paciente, tenta por Paciente (tratando NULL)
+        if row is None and pac is not None:
+            row = conn.execute(text("""
+                SELECT id FROM cirurgias
+                WHERE Hospital = :h AND Prestador = :p AND Data_Cirurgia = :d
+                  AND (Paciente = :pac OR (Paciente IS NULL AND :pac IS NULL))
+            """), {"h": h, "p": p, "d": d, "pac": pac}).fetchone()
 
         if row:
+            # UPDATE
             conn.execute(text("""
                 UPDATE cirurgias SET
+                    Atendimento = :Atendimento,
                     Paciente = :Paciente,
                     Convenio = :Convenio,
                     Procedimento_Tipo_ID = :Procedimento_Tipo_ID,
@@ -467,9 +496,10 @@ def insert_or_update_cirurgia(payload: Dict[str, Any]) -> int:
                     Observacoes = :Observacoes,
                     updated_at = datetime('now')
                 WHERE id = :id
-            """), {**params, "id": int(row[0])})
+            """), {**params_all, "id": int(row[0])})
             return int(row[0])
         else:
+            # INSERT
             result = conn.execute(text("""
                 INSERT INTO cirurgias (
                     Hospital, Atendimento, Paciente, Prestador, Data_Cirurgia,
@@ -480,7 +510,7 @@ def insert_or_update_cirurgia(payload: Dict[str, Any]) -> int:
                     :Convenio, :Procedimento_Tipo_ID, :Situacao_ID,
                     :Guia_AMHPTISS, :Guia_AMHPTISS_Complemento, :Fatura, :Observacoes
                 )
-            """), params)
+            """), params_all)
             return int(result.lastrowid)
 
 
