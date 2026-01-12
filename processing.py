@@ -136,9 +136,10 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
         if current_section and any(t for t in tokens):
             nonempty = [t for t in tokens if t]
             if len(nonempty) >= 4:
+                # CORREÇÃO: Não herda dados de paciente aqui para permitir a lógica de prestador diferente depois
                 rows.append({
-                    "Centro": current_section, "Data": current_date_str, "Atendimento": ctx["atendimento"],
-                    "Paciente": ctx["paciente"], "Aviso": ctx["aviso"], "Hora_Inicio": ctx["hora_inicio"],
+                    "Centro": current_section, "Data": current_date_str, "Atendimento": None,
+                    "Paciente": None, "Aviso": None, "Hora_Inicio": ctx["hora_inicio"],
                     "Cirurgia": nonempty[0], "Convenio": nonempty[-5] if len(nonempty)>=5 else None,
                     "Prestador": nonempty[-4], "Anestesista": nonempty[-3], "Tipo_Anestesia": nonempty[-2],
                     "Quarto": nonempty[-1], "_row_idx": row_idx
@@ -160,31 +161,29 @@ def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
         df["_row_idx"] = range(len(df))
 
     for _, grp in df.groupby("Data", sort=False):
-        # Memória dos dados da cirurgia principal
         last_att, last_pac, last_av = pd.NA, pd.NA, pd.NA
-        # Memória de QUEM era o prestador da cirurgia principal (que tinha os dados)
-        prestador_dono_dos_dados = pd.NA
+        last_provider = pd.NA
         
         for i in grp.sort_values("_row_idx").index:
-            curr_att = df.at[i, "Atendimento"]
-            curr_pac = df.at[i, "Paciente"]
-            curr_av  = df.at[i, "Aviso"]
-            curr_prest = str(df.at[i, "Prestador"]).strip().upper() if pd.notna(df.at[i, "Prestador"]) else ""
+            curr_att, curr_pac, curr_av = df.at[i, "Atendimento"], df.at[i, "Paciente"], df.at[i, "Aviso"]
+            curr_prest_raw = df.at[i, "Prestador"]
+            curr_prest = str(curr_prest_raw).strip().upper() if pd.notna(curr_prest_raw) else ""
 
-            # Se a linha atual TEM Atendimento ou Paciente ou Aviso, ela é uma "Linha Mestra"
-            # Atualizamos a memória e guardamos quem é o dono desses dados
-            if pd.notna(curr_att) or pd.notna(curr_pac) or pd.notna(curr_av):
+            # Verifica se a linha possui dados nativos
+            has_native_data = pd.notna(curr_att) or pd.notna(curr_pac) or pd.notna(curr_av)
+
+            if not has_native_data:
+                # REGRA: Só herda se o prestador atual for DIFERENTE do prestador da linha anterior
+                if curr_prest != "" and curr_prest != last_provider:
+                    df.at[i, "Atendimento"], df.at[i, "Paciente"], df.at[i, "Aviso"] = last_att, last_pac, last_av
+
+            # Atualiza memória dos dados caso encontre uma linha com dados nativos
+            if has_native_data:
                 last_att, last_pac, last_av = curr_att, curr_pac, curr_av
-                prestador_dono_dos_dados = curr_prest
-                continue # Não precisa herdar de si mesma
-
-            # Se a linha atual NÃO TEM os 3 dados, mas TEM um prestador:
-            if pd.notna(df.at[i, "Prestador"]) and curr_prest != "":
-                # REGRA: Só herda se o prestador atual for DIFERENTE do dono original dos dados
-                if curr_prest != prestador_dono_dos_dados:
-                    df.at[i, "Atendimento"] = last_att
-                    df.at[i, "Paciente"]    = last_pac
-                    df.at[i, "Aviso"]       = last_av
+            
+            # Atualiza o último prestador visto para a comparação da próxima linha
+            if curr_prest != "":
+                last_provider = curr_prest
                 
     return df
 
@@ -209,10 +208,9 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
     df_in = _normalize_columns(df_in)
     if "_row_idx" not in df_in.columns: df_in["_row_idx"] = range(len(df_in))
 
-    # Aplica herança seletiva
+    # Aplica herança seletiva (somente se mudar o médico)
     df = _herdar_por_data_ordem_original(df_in)
 
-    # Filtro final para os prestadores do seu interesse
     target = [_strip_accents(p).strip().upper() for p in prestadores_lista]
     df["Prestador_norm"] = df["Prestador"].apply(lambda x: _strip_accents(x).strip().upper())
     df = df[df["Prestador_norm"].isin(target)].copy()
