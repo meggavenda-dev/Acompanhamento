@@ -147,7 +147,7 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 # ===================================================
-# Herança - TRAVA POR BLOCO E POR MÉDICO (CORRIGIDO)
+# Herança - TRAVA POR BLOCO E POR MÉDICO
 # ===================================================
 
 def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
@@ -173,7 +173,6 @@ def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
             tem_dados_nativos = pd.notna(curr_att) or pd.notna(curr_pac) or pd.notna(curr_av)
 
             if tem_dados_nativos:
-                # --- CORREÇÃO: Comparação segura contra pd.NA usando strings ---
                 str_curr_att = str(curr_att) if pd.notna(curr_att) else "None"
                 str_last_att = str(last_att) if pd.notna(last_att) else "None"
                 str_curr_av  = str(curr_av)  if pd.notna(curr_av)  else "None"
@@ -217,9 +216,13 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
 
     df = _herdar_por_data_ordem_original(df_in)
 
+    # Filtro de prestadores escolhidos
     target = [_strip_accents(p).strip().upper() for p in prestadores_lista]
     df["Prestador_norm"] = df["Prestador"].apply(lambda x: _strip_accents(x).strip().upper())
     df = df[df["Prestador_norm"].isin(target)].copy()
+
+    # CORREÇÃO: Remove duplicidades do mesmo médico (linhas que ficaram vazias após a trava de herança)
+    df = df.dropna(subset=["Atendimento", "Paciente", "Aviso"], how="all")
 
     dt = pd.to_datetime(df["Data"], format="%d/%m/%Y", errors="coerce")
     df["Hospital"], df["Ano"], df["Mes"], df["Dia"] = selected_hospital, dt.dt.year, dt.dt.month, dt.dt.day
