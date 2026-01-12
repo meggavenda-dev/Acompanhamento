@@ -425,8 +425,11 @@ with tabs[1]:
         st.markdown("#### Lista de Cirurgias (com pacientes carregados da base)")
         st.caption("Edite diretamente no grid. Selecione **Tipo (nome)** e **Situação (nome)**; ao salvar, o app preenche os IDs correspondentes.")
 
-        # 👇 Oculta as colunas numéricas na visão do editor para evitar edição manual do ID
-        df_edit_view = df_union.drop(columns=["Procedimento_Tipo_ID", "Situacao_ID"], errors="ignore")
+        # 👇 Oculta as colunas numéricas e de auditoria na visão do editor
+        df_edit_view = df_union.drop(
+            columns=["Procedimento_Tipo_ID", "Situacao_ID", "created_at", "updated_at"],
+            errors="ignore"
+        )
 
         edited_df = st.data_editor(
             df_edit_view,
@@ -457,9 +460,6 @@ with tabs[1]:
                 "Guia_AMHPTISS_Complemento": st.column_config.TextColumn(),
                 "Fatura": st.column_config.TextColumn(),
                 "Observacoes": st.column_config.TextColumn(),
-
-                "created_at": st.column_config.TextColumn(disabled=True),
-                "updated_at": st.column_config.TextColumn(disabled=True),
             },
             key="editor_lista_cirurgias_union"
         )
