@@ -176,7 +176,7 @@ tabs = st.tabs([
 ])
 
 # ====================================================================================
-# 📥 Aba 1: Importação &amp; Pacientes
+# 📥 Aba 1: Importação & Pacientes
 # ====================================================================================
 with tabs[0]:
     st.subheader("Pacientes únicos por data, prestador e hospital")
@@ -662,7 +662,7 @@ with tabs[1]:
         st.exception(e)
 
 # ====================================================================================
-# 📚 Aba 3: Cadastro (Tipos &amp; Situações) — reset counter + ordem auto-incremental + lote
+# 📚 Aba 3: Cadastro (Tipos & Situações) — reset counter + ordem auto-incremental + lote
 # ====================================================================================
 with tabs[2]:
     st.subheader("Catálogos de Tipos de Procedimento e Situações da Cirurgia")
@@ -879,7 +879,7 @@ with tabs[2]:
     next_sit_ordem = _next_sit_ordem_from_cache(df_sits_cached)
 
     def _upload_db_situacao(commit_msg: str):
-        if GITHUB_SYNC_AVAILABLE AND GITHUB_TOKEN_OK:
+        if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
             try:
                 ok = upload_db_to_github(
                     owner=GH_OWNER,
