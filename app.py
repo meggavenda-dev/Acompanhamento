@@ -296,6 +296,19 @@ with tabs[1]:
     )
     prestadores_lista_filtro = [p.strip() for p in prestadores_filtro.split(";") if p.strip()]
 
+    # ---- Recarregar catálogos (Tipos/Situações) ----
+    col_refresh, col_refresh_info = st.columns([1.5, 2.5])
+    with col_refresh:
+        if st.button("🔄 Recarregar catálogos (Tipos/Situações)"):
+            st.session_state["catalog_refresh_ts"] = datetime.now().isoformat(timespec="seconds")
+            st.success(f"Catálogos recarregados às {st.session_state['catalog_refresh_ts']}")
+            # O botão dispara um rerun automaticamente.
+
+    with col_refresh_info:
+        ts = st.session_state.get("catalog_refresh_ts")
+        if ts:
+            st.caption(f"Último recarregamento: {ts}")
+
     # -------- Carregar catálogos (para dropdowns do grid) --------
     # TIPOS: apenas ativos, ordenados por 'ordem' e 'nome'
     tipos_rows = list_procedimento_tipos(only_active=True)
@@ -669,7 +682,7 @@ with tabs[2]:
 
         st.markdown("##### Cadastrar vários tipos (em lote)")
         bulk_suffix = st.session_state["tipo_bulk_reset"]
-        st.caption("Informe um tipo por linha. Ex.: Consulta\\nECG\\nRaio-X")
+        st.caption("Informe um tipo por linha. Ex.: Consulta\nECG\nRaio-X")
         st.text_area("Tipos (um por linha)", height=120, key=f"tipo_bulk_input_{bulk_suffix}")
         st.number_input("Ordem inicial (auto-incrementa)", min_value=0, value=next_tipo_ordem, step=1, key=f"tipo_bulk_ordem_{bulk_suffix}")
         st.checkbox("Ativo (padrão)", value=True, key=f"tipo_bulk_ativo_{bulk_suffix}")
@@ -723,6 +736,21 @@ with tabs[2]:
         st.button("Salvar tipos em lote", on_click=_save_tipos_bulk_and_reset)
 
     with colB:
+        # Ações rápidas: recarregar catálogos de Tipos
+        st.markdown("##### Ações rápidas (Tipos)")
+        col_btn_tipos, _ = st.columns([1.5, 2.5])
+        with col_btn_tipos:
+            if st.button("🔄 Recarregar catálogos de Tipos"):
+                from db import list_procedimento_tipos
+                try:
+                    tipos_allX = list_procedimento_tipos(only_active=False)
+                    dfX = pd.DataFrame(tipos_allX, columns=["id", "nome", "ativo", "ordem"]) if tipos_allX else pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
+                    st.session_state["df_tipos_cached"] = dfX
+                    st.success("Tipos recarregados com sucesso.")
+                except Exception as e:
+                    st.error("Falha ao recarregar tipos.")
+                    st.exception(e)
+
         from db import set_procedimento_tipo_status
         try:
             df_tipos = st.session_state.get("df_tipos_cached", pd.DataFrame(columns=["id", "nome", "ativo", "ordem"]))
@@ -846,6 +874,21 @@ with tabs[2]:
         st.button("Salvar situação", on_click=_save_sit_and_reset)
 
     with colD:
+        # Ações rápidas: recarregar catálogos de Situações
+        st.markdown("##### Ações rápidas (Situações)")
+        col_btn_sits, _ = st.columns([1.5, 2.5])
+        with col_btn_sits:
+            if st.button("🔄 Recarregar catálogos de Situações"):
+                from db import list_cirurgia_situacoes
+                try:
+                    sits_allX = list_cirurgia_situacoes(only_active=False)
+                    dfX = pd.DataFrame(sits_allX, columns=["id", "nome", "ativo", "ordem"]) if sits_allX else pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
+                    st.session_state["df_sits_cached"] = dfX
+                    st.success("Situações recarregadas com sucesso.")
+                except Exception as e:
+                    st.error("Falha ao recarregar situações.")
+                    st.exception(e)
+
         from db import set_cirurgia_situacao_status
         try:
             df_sits = st.session_state.get("df_sits_cached", pd.DataFrame(columns=["id", "nome", "ativo", "ordem"]))
@@ -929,7 +972,7 @@ with tabs[3]:
     page = st.number_input("Página", min_value=1, max_value=max_page, value=1, step=1)
     start, end = (page - 1) * per_page, (page - 1) * per_page + per_page
     df_page = df_view.iloc[start:end].copy()
-    st.caption(f"Exibindo {len(df_page)} de {total_rows} registro(s) — página {page}/{max_page}")
+    st.caption(f"Exibindo {len[df_page]} de {total_rows} registro(s) — página {page}/{max_page}")
     st.dataframe(df_page, use_container_width=True)
 
     st.markdown("#### Exportar")
@@ -973,8 +1016,3 @@ with tabs[3]:
     with st.expander("ℹ️ Ajuda / Diagnóstico", expanded=False):
         st.markdown("""
         - **Status**: escolha **Ativos** para ver apenas os que aparecem na Aba **Cirurgias** (dropdown “Tipo (nome)”).
-        - **Ordenação**: por padrão ordenamos por **ordem**.
-        - **Busca**: digite parte do nome e pressione Enter.
-        - **Paginação**: ajuste conforme necessário.
-        - **Exportar**: baixa exatamente o que está filtrado/ordenado.
-        """)
