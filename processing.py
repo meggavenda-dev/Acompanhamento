@@ -70,7 +70,7 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # =========================
-# Parser de texto bruto (CORRIGIDO)
+# Parser de texto bruto
 # =========================
 
 def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
@@ -81,7 +81,6 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
     row_idx = 0
 
     for line in text.splitlines():
-        # CORREÇÃO: Captura data apenas se for linha de "Data de Realização"
         if "Data de Realização" in line or "Data de Realiza" in line:
             m_date = DATE_RE.search(line)
             if m_date:
@@ -125,7 +124,6 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
             cirurgia = tokens[base_idx + 1] if base_idx + 1 < len(tokens) else None
             convenio = tokens[base_idx + 2] if base_idx + 2 < len(tokens) else None
             
-            # CORREÇÃO: Se o campo do Prestador tiver uma data (Nascimento), pula para o próximo token
             p_cand = tokens[base_idx + 3] if base_idx + 3 < len(tokens) else None
             if p_cand and DATE_RE.search(p_cand):
                 prestador = tokens[base_idx + 4] if base_idx + 4 < len(tokens) else p_cand
@@ -158,28 +156,46 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 # =========================
-# Herança e Pipeline
+# Herança REFORÇADA (AJUSTADA)
 # =========================
 
 def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty: return df
     df = df.copy()
     df.replace({"": pd.NA}, inplace=True)
+    
+    # Preenchimento básico da data para agrupamento
     df["Data"] = df["Data"].ffill().bfill()
 
     for _, grp in df.groupby("Data", sort=False):
-        l_att, l_pac, l_av = pd.NA, pd.NA, pd.NA
+        last_att, last_pac, last_av = pd.NA, pd.NA, pd.NA
+        
         for i in grp.sort_values("_row_idx").index:
-            att, pac, av = df.at[i, "Atendimento"], df.at[i, "Paciente"], df.at[i, "Aviso"]
-            if pd.notna(att): l_att = att
-            if pd.notna(pac): l_pac = pac
-            if pd.notna(av): l_av = av
+            curr_att = df.at[i, "Atendimento"]
+            curr_pac = df.at[i, "Paciente"]
+            curr_av  = df.at[i, "Aviso"]
+            curr_prest = df.at[i, "Prestador"]
 
-            if pd.notna(df.at[i, "Prestador"]):
-                if pd.isna(att): df.at[i, "Atendimento"] = l_att
-                if pd.isna(av): df.at[i, "Aviso"] = l_av
-                if pd.isna(pac): df.at[i, "Paciente"] = l_pac if pd.notna(l_pac) else pd.NA
+            # 1. Atualiza memória se a linha atual trouxer dados novos
+            if pd.notna(curr_att): last_att = curr_att
+            if pd.notna(curr_pac): last_pac = curr_pac
+            if pd.notna(curr_av):  last_av  = curr_av
+
+            # 2. Regra solicitada: Se houver prestador MAS Atend, Paciente e Aviso estiverem vazios
+            # Considera a última cirurgia anterior (herda os 3 dados)
+            has_prestador = pd.notna(curr_prest) and str(curr_prest).strip() != ""
+            missing_all_3 = pd.isna(curr_att) and pd.isna(curr_pac) and pd.isna(curr_av)
+
+            if has_prestador and missing_all_3:
+                df.at[i, "Atendimento"] = last_att
+                df.at[i, "Paciente"]    = last_pac
+                df.at[i, "Aviso"]       = last_av
+                
     return df
+
+# =========================
+# Pipeline principal
+# =========================
 
 def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
     name = upload.name.lower()
@@ -197,16 +213,17 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
         df_in = _parse_raw_text_to_rows(text)
 
     df_in = _normalize_columns(df_in)
-    df_in["__pac_raw"] = df_in["Paciente"]
+    
+    # Herança aplicada ANTES do filtro de prestadores para garantir que os dados existam
     df = _herdar_por_data_ordem_original(df_in)
 
+    # Filtro de prestadores
     target = [_strip_accents(p).strip().upper() for p in prestadores_lista]
     df["Prestador_norm"] = df["Prestador"].apply(lambda x: _strip_accents(x).strip().upper())
     df = df[df["Prestador_norm"].isin(target)].copy()
 
-    df["Paciente"] = df["__pac_raw"]
     dt = pd.to_datetime(df["Data"], format="%d/%m/%Y", errors="coerce")
     df["Hospital"], df["Ano"], df["Mes"], df["Dia"] = selected_hospital, dt.dt.year, dt.dt.month, dt.dt.day
 
     cols = ["Hospital", "Ano", "Mes", "Dia", "Data", "Atendimento", "Paciente", "Aviso", "Convenio", "Prestador", "Quarto"]
-    return df[cols].sort_values(["Ano", "Mes", "Dia", "Paciente"]).reset_index(drop=True)
+    return df[cols].sort_values(["Ano", "Mes", "Dia", "_row_idx"]).reset_index(drop=True)
