@@ -1,7 +1,7 @@
 
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-import os, math
+import os, math, tempfile
 from typing import Dict, Any
 from datetime import datetime
 from sqlalchemy import create_engine, text
@@ -9,9 +9,8 @@ from sqlalchemy import create_engine, text
 # =============================================================================
 # CONFIGURAÇÃO DO BANCO
 # =============================================================================
-MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(MODULE_DIR, "data")
-os.makedirs(DATA_DIR, exist_ok=True)
+# Usa diretório temporário para evitar problemas de permissão
+DATA_DIR = tempfile.gettempdir()
 DB_PATH = os.path.join(DATA_DIR, "exemplo.db")
 DB_URI = f"sqlite:///{DB_PATH}"
 
@@ -336,3 +335,4 @@ def delete_cirurgia(cirurgia_id: int):
     engine = get_engine()
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM cirurgias WHERE id=:i"), {"i": int(cirurgia_id)})
+
