@@ -253,7 +253,7 @@ with tabs[1]:
 
     # -------- Filtros de carregamento --------
     st.markdown("#### Filtros para carregar pacientes na Lista de Cirurgias")
-    # ALTERAÇÃO: adiciona checkbox para tornar Ano/Mês opcionais
+    # Checkbox para tornar Ano/Mês opcionais
     colF0, colF1, colF2, colF3 = st.columns([1, 1, 1, 1])
     with colF0:
         usar_periodo = st.checkbox(
@@ -317,22 +317,21 @@ with tabs[1]:
         # 2) Registros base da tabela de pacientes para período/hospital
         base_rows = find_registros_para_prefill(
             hosp_cad,
-            ano=int(ano_cad) if usar_periodo else None,  # ALTERAÇÃO: condicional
-            mes=int(mes_cad) if usar_periodo else None,  # ALTERAÇÃO: condicional
+            ano=int(ano_cad) if usar_periodo else None,
+            mes=int(mes_cad) if usar_periodo else None,
             prestadores=prestadores_lista_filtro  # vazio -> não filtra
         )
         df_base = pd.DataFrame(base_rows, columns=["Hospital", "Data", "Atendimento", "Paciente", "Convenio", "Prestador"])
         if df_base.empty:
             df_base = pd.DataFrame(columns=["Hospital", "Data", "Atendimento", "Paciente", "Convenio", "Prestador"])
         else:
-            # ALTERAÇÃO: evita "nan" string ao converter para grid
+            # evita "nan" string ao converter para grid
             for col in ["Hospital", "Data", "Atendimento", "Paciente", "Convenio", "Prestador"]:
                 df_base[col] = df_base[col].fillna("").astype(str)
 
         st.info(f"Cirurgias já salvas encontradas: {len(df_cir)} | Candidatos da base (período/hospital): {len(df_base)}")
 
         # Aviso de diagnóstico quando não retorna candidatos
-        # ALTERAÇÃO: diagnóstico amigável
         if df_base.empty:
             st.warning("Nenhum candidato carregado da base com os filtros atuais.")
             st.markdown("- Confira se o **Hospital** na Aba 2 coincide com o hospital salvo na Aba 1.")
@@ -362,7 +361,7 @@ with tabs[1]:
         })
 
         # 3) União preferindo cirurgias já existentes (para evitar duplicar a mesma chave)
-        # ALTERAÇÃO: chave resiliente usa Atendimento quando houver; senão Paciente
+        # chave resiliente usa Atendimento quando houver; senão Paciente
         df_union = pd.concat([df_cir, df_base_mapped], ignore_index=True)
         df_union["_has_id"] = df_union["id"].notna().astype(int)
 
@@ -423,6 +422,7 @@ with tabs[1]:
                         att = str(r.get("Atendimento", "")).strip()
                         p = str(r.get("Prestador", "")).strip()
                         d = str(r.get("Data_Cirurgia", "")).strip()
+                        # aceita Atendimento OU Paciente (chave resiliente)
                         if h and p and d and (att or str(r.get("Paciente", "")).strip()):
                             payload = {
                                 "Hospital": h,
@@ -531,14 +531,29 @@ with tabs[2]:
     colA, colB = st.columns([2, 1])
 
     with colA:
-        from db import upsert_procedimento_tipo
-        tipo_nome = st.text_input("Novo tipo / atualizar por nome", placeholder="Ex.: Colecistectomia")
-        tipo_ordem = st.number_input("Ordem (para ordenar listagem)", min_value=0, value=0, step=1)
-        tipo_ativo = st.checkbox("Ativo", value=True)
+        from db import upsert_procedimento_tipo, list_procedimento_tipos
+        # Inputs com state para poder limpar após salvar
+        tipo_nome = st.text_input("Novo tipo / atualizar por nome", placeholder="Ex.: Colecistectomia", key="tipo_nome_input")
+        tipo_ordem = st.number_input("Ordem (para ordenar listagem)", min_value=0, value=0, step=1, key="tipo_ordem_input")
+        tipo_ativo = st.checkbox("Ativo", value=True, key="tipo_ativo_input")
         if st.button("Salvar tipo de procedimento"):
             try:
                 tid = upsert_procedimento_tipo(tipo_nome.strip(), int(tipo_ativo), int(tipo_ordem))
                 st.success(f"Tipo salvo (id={tid}).")
+
+                # Recarrega e cacheia para o grid
+                tipos_all = list_procedimento_tipos(only_active=False)
+                df_tipos = pd.DataFrame(tipos_all, columns=["id", "nome", "ativo", "ordem"])
+                st.session_state["df_tipos_cached"] = df_tipos
+
+                # Limpa campos para próximo cadastro
+                st.session_state["tipo_nome_input"] = ""
+                st.session_state["tipo_ordem_input"] = 0
+                st.session_state["tipo_ativo_input"] = True
+
+                prox_id = (df_tipos["id"].max() + 1) if not df_tipos.empty else 1
+                st.info(f"Próximo ID previsto: {prox_id}")
+
             except Exception as e:
                 st.error("Falha ao salvar tipo.")
                 st.exception(e)
@@ -546,15 +561,21 @@ with tabs[2]:
     with colB:
         from db import list_procedimento_tipos, set_procedimento_tipo_status
         try:
-            tipos = list_procedimento_tipos(only_active=False)
-            if tipos:
-                df_tipos = pd.DataFrame(tipos, columns=["id", "nome", "ativo", "ordem"])
+            df_tipos = st.session_state.get("df_tipos_cached")
+            if df_tipos is None:
+                tipos = list_procedimento_tipos(only_active=False)
+                if tipos:
+                    df_tipos = pd.DataFrame(tipos, columns=["id", "nome", "ativo", "ordem"])
+                else:
+                    df_tipos = pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
+
+            if not df_tipos.empty:
                 st.data_editor(
                     df_tipos,
                     use_container_width=True,
                     column_config={
-                        "id": st.column_config.NumberColumn(disabled=True),
-                        "nome": st.column_config.TextColumn(disabled=True),
+                        "id": st.column_config.NumberColumn(disabled=True),   # ID somente leitura
+                        "nome": st.column_config.TextColumn(disabled=True),   # edição do nome via formulário
                         "ordem": st.column_config.NumberColumn(),
                         "ativo": st.column_config.CheckboxColumn(),
                     },
@@ -565,6 +586,14 @@ with tabs[2]:
                         for _, r in df_tipos.iterrows():
                             set_procedimento_tipo_status(int(r["id"]), int(r["ativo"]))
                         st.success("Tipos atualizados.")
+
+                        # Recarrega e atualiza próximo ID
+                        tipos = list_procedimento_tipos(only_active=False)
+                        df_tipos = pd.DataFrame(tipos, columns=["id", "nome", "ativo", "ordem"])
+                        st.session_state["df_tipos_cached"] = df_tipos
+                        prox_id = (df_tipos["id"].max() + 1) if not df_tipos.empty else 1
+                        st.info(f"Próximo ID previsto: {prox_id}")
+
                     except Exception as e:
                         st.error("Falha ao aplicar alterações nos tipos.")
                         st.exception(e)
@@ -579,14 +608,28 @@ with tabs[2]:
     colC, colD = st.columns([2, 1])
 
     with colC:
-        from db import upsert_cirurgia_situacao
-        sit_nome = st.text_input("Nova situação / atualizar por nome", placeholder="Ex.: Realizada, Cancelada, Adiada")
-        sit_ordem = st.number_input("Ordem (para ordenar listagem)", min_value=0, value=0, step=1, key="sit_ordem")
-        sit_ativo = st.checkbox("Ativo", value=True, key="sit_ativo")
+        from db import upsert_cirurgia_situacao, list_cirurgia_situacoes
+        sit_nome = st.text_input("Nova situação / atualizar por nome", placeholder="Ex.: Realizada, Cancelada, Adiada", key="sit_nome_input")
+        sit_ordem = st.number_input("Ordem (para ordenar listagem)", min_value=0, value=0, step=1, key="sit_ordem_input")
+        sit_ativo = st.checkbox("Ativo", value=True, key="sit_ativo_input")
         if st.button("Salvar situação"):
             try:
                 sid = upsert_cirurgia_situacao(sit_nome.strip(), int(sit_ativo), int(sit_ordem))
                 st.success(f"Situação salva (id={sid}).")
+
+                # Recarrega e cacheia para o grid
+                sits_all = list_cirurgia_situacoes(only_active=False)
+                df_sits = pd.DataFrame(sits_all, columns=["id", "nome", "ativo", "ordem"])
+                st.session_state["df_sits_cached"] = df_sits
+
+                # Limpa campos para próximo cadastro
+                st.session_state["sit_nome_input"] = ""
+                st.session_state["sit_ordem_input"] = 0
+                st.session_state["sit_ativo_input"] = True
+
+                prox_id_s = (df_sits["id"].max() + 1) if not df_sits.empty else 1
+                st.info(f"Próximo ID previsto: {prox_id_s}")
+
             except Exception as e:
                 st.error("Falha ao salvar situação.")
                 st.exception(e)
@@ -594,15 +637,21 @@ with tabs[2]:
     with colD:
         from db import list_cirurgia_situacoes, set_cirurgia_situacao_status
         try:
-            sits = list_cirurgia_situacoes(only_active=False)
-            if sits:
-                df_sits = pd.DataFrame(sits, columns=["id", "nome", "ativo", "ordem"])
+            df_sits = st.session_state.get("df_sits_cached")
+            if df_sits is None:
+                sits = list_cirurgia_situacoes(only_active=False)
+                if sits:
+                    df_sits = pd.DataFrame(sits, columns=["id", "nome", "ativo", "ordem"])
+                else:
+                    df_sits = pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
+
+            if not df_sits.empty:
                 st.data_editor(
                     df_sits,
                     use_container_width=True,
                     column_config={
-                        "id": st.column_config.NumberColumn(disabled=True),
-                        "nome": st.column_config.TextColumn(disabled=True),
+                        "id": st.column_config.NumberColumn(disabled=True),   # ID somente leitura
+                        "nome": st.column_config.TextColumn(disabled=True),   # edição do nome via formulário
                         "ordem": st.column_config.NumberColumn(),
                         "ativo": st.column_config.CheckboxColumn(),
                     },
@@ -613,6 +662,14 @@ with tabs[2]:
                         for _, r in df_sits.iterrows():
                             set_cirurgia_situacao_status(int(r["id"]), int(r["ativo"]))
                         st.success("Situações atualizadas.")
+
+                        # Recarrega e informa próximo ID
+                        sits = list_cirurgia_situacoes(only_active=False)
+                        df_sits = pd.DataFrame(sits, columns=["id", "nome", "ativo", "ordem"])
+                        st.session_state["df_sits_cached"] = df_sits
+                        prox_id_s = (df_sits["id"].max() + 1) if not df_sits.empty else 1
+                        st.info(f"Próximo ID previsto: {prox_id_s}")
+
                     except Exception as e:
                         st.error("Falha ao aplicar alterações nas situações.")
                         st.exception(e)
