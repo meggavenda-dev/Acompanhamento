@@ -20,12 +20,6 @@ EXPECTED_COLS = [
     "Anestesista", "Tipo_Anestesia", "Quarto"
 ]
 
-REQUIRED_COLS = [
-    "Data", "Prestador", "Hora_Inicio",
-    "Atendimento", "Paciente", "Aviso",
-    "Convenio", "Quarto"
-]
-
 PROCEDURE_HINTS = {
     "HERNIA", "HERNIORRAFIA", "COLECISTECTOMIA", "APENDICECTOMIA",
     "ENDOMETRIOSE", "SINOVECTOMIA", "OSTEOCONDROPLASTIA", "ARTROPLASTIA",
@@ -156,40 +150,28 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 # =========================
-# Herança REFORÇADA (AJUSTADA)
+# Herança
 # =========================
 
 def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty: return df
     df = df.copy()
     df.replace({"": pd.NA}, inplace=True)
-    
-    # Preenchimento básico da data para agrupamento
     df["Data"] = df["Data"].ffill().bfill()
+
+    if "_row_idx" not in df.columns:
+        df["_row_idx"] = range(len(df))
 
     for _, grp in df.groupby("Data", sort=False):
         last_att, last_pac, last_av = pd.NA, pd.NA, pd.NA
-        
         for i in grp.sort_values("_row_idx").index:
-            curr_att = df.at[i, "Atendimento"]
-            curr_pac = df.at[i, "Paciente"]
-            curr_av  = df.at[i, "Aviso"]
-            curr_prest = df.at[i, "Prestador"]
-
-            # 1. Atualiza memória se a linha atual trouxer dados novos
+            curr_att, curr_pac, curr_av = df.at[i, "Atendimento"], df.at[i, "Paciente"], df.at[i, "Aviso"]
             if pd.notna(curr_att): last_att = curr_att
             if pd.notna(curr_pac): last_pac = curr_pac
             if pd.notna(curr_av):  last_av  = curr_av
 
-            # 2. Regra solicitada: Se houver prestador MAS Atend, Paciente e Aviso estiverem vazios
-            # Considera a última cirurgia anterior (herda os 3 dados)
-            has_prestador = pd.notna(curr_prest) and str(curr_prest).strip() != ""
-            missing_all_3 = pd.isna(curr_att) and pd.isna(curr_pac) and pd.isna(curr_av)
-
-            if has_prestador and missing_all_3:
-                df.at[i, "Atendimento"] = last_att
-                df.at[i, "Paciente"]    = last_pac
-                df.at[i, "Aviso"]       = last_av
+            if pd.notna(df.at[i, "Prestador"]) and pd.isna(curr_att) and pd.isna(curr_pac) and pd.isna(curr_av):
+                df.at[i, "Atendimento"], df.at[i, "Paciente"], df.at[i, "Aviso"] = last_att, last_pac, last_av
                 
     return df
 
@@ -214,7 +196,11 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
 
     df_in = _normalize_columns(df_in)
     
-    # Herança aplicada ANTES do filtro de prestadores para garantir que os dados existam
+    # GARANTIA: Cria indexador de ordem original se não existir
+    if "_row_idx" not in df_in.columns:
+        df_in["_row_idx"] = range(len(df_in))
+
+    # Processamento de herança
     df = _herdar_por_data_ordem_original(df_in)
 
     # Filtro de prestadores
@@ -222,8 +208,14 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
     df["Prestador_norm"] = df["Prestador"].apply(lambda x: _strip_accents(x).strip().upper())
     df = df[df["Prestador_norm"].isin(target)].copy()
 
+    # Datas
     dt = pd.to_datetime(df["Data"], format="%d/%m/%Y", errors="coerce")
     df["Hospital"], df["Ano"], df["Mes"], df["Dia"] = selected_hospital, dt.dt.year, dt.dt.month, dt.dt.day
 
-    cols = ["Hospital", "Ano", "Mes", "Dia", "Data", "Atendimento", "Paciente", "Aviso", "Convenio", "Prestador", "Quarto"]
-    return df[cols].sort_values(["Ano", "Mes", "Dia", "_row_idx"]).reset_index(drop=True)
+    # Seleção de colunas (Mantendo o _row_idx temporariamente para o sort)
+    cols_to_return = ["Hospital", "Ano", "Mes", "Dia", "Data", "Atendimento", "Paciente", "Aviso", "Convenio", "Prestador", "Quarto"]
+    
+    # Ordenação final usando a ordem original das linhas no arquivo
+    df = df.sort_values(["Ano", "Mes", "Dia", "_row_idx"])
+    
+    return df[cols_to_return].reset_index(drop=True)
