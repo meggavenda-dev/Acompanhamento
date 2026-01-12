@@ -27,9 +27,9 @@ st.set_page_config(page_title="Gestão de Pacientes e Cirurgias", layout="wide")
 
 # --- Header ---
 st.title("Gestão de Pacientes e Cirurgias")
-st.caption("Download automático do banco no GitHub → Importação/Processamento → Revisão/Salvar → Exportar → Cirurgias → Catálogos")
+st.caption("Download do banco no GitHub (1x) → Importar/Processar → Revisar/Salvar → Exportar → Cirurgias (com catálogos) → Cadastro/Lista")
 
-# Baixar DB do GitHub apenas 1x por sessão (ou se não existir)
+# Baixar DB do GitHub apenas 1x por sessão (ou se não existir localmente)
 if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
     if ("gh_db_fetched" not in st.session_state) or (not st.session_state["gh_db_fetched"]):
         if not os.path.exists(DB_PATH):
@@ -76,7 +76,7 @@ with st.sidebar:
 # Inicializa DB
 init_db()
 
-# Lista única de hospitais
+# Lista única de hospitais (ajuste conforme necessário)
 HOSPITAL_OPCOES = [
     "Hospital Santa Lucia Sul",
     "Hospital Santa Lucia Norte",
@@ -302,7 +302,6 @@ with tabs[1]:
         if st.button("🔄 Recarregar catálogos (Tipos/Situações)"):
             st.session_state["catalog_refresh_ts"] = datetime.now().isoformat(timespec="seconds")
             st.success(f"Catálogos recarregados às {st.session_state['catalog_refresh_ts']}")
-            # O próprio botão provoca rerun; os catálogos serão reconsultados abaixo.
 
     with col_refresh_info:
         ts = st.session_state.get("catalog_refresh_ts")
@@ -316,8 +315,8 @@ with tabs[1]:
     if not df_tipos_cat.empty:
         df_tipos_cat = df_tipos_cat.sort_values(["ordem", "nome"], kind="mergesort")
         tipo_nome_list = df_tipos_cat["nome"].tolist()
-        tipo_nome2id = dict(zip(df_tipos_cat["nome"], df_tipos_cat["id"]))
-        tipo_id2nome = dict(zip(df_tipos_cat["id"], df_tipos_cat["nome"]))
+        tipo_nome2id = dict(zip(df_tipos_cat["nome"], df_tipos_cat["id"]))  # nome -> id
+        tipo_id2nome = dict(zip(df_tipos_cat["id"], df_tipos_cat["nome"]))  # id -> nome
     else:
         tipo_nome_list = []
         tipo_nome2id = {}
@@ -359,8 +358,8 @@ with tabs[1]:
                 "Observacoes", "created_at", "updated_at"
             ])
 
+        # Prepara nomes legíveis a partir dos IDs para linhas existentes
         df_cir["Fonte"] = "Cirurgia"
-        # Nomes mapeados a partir dos IDs atuais
         df_cir["Tipo (nome)"] = df_cir["Procedimento_Tipo_ID"].map(tipo_id2nome).fillna("")
         df_cir["Situação (nome)"] = df_cir["Situacao_ID"].map(sit_id2nome).fillna("")
 
@@ -387,7 +386,7 @@ with tabs[1]:
                 st.markdown("- Deixe **Prestadores** vazio para não filtrar.")
                 st.markdown("- O filtro aceita datas em `dd/MM/yyyy` e `YYYY-MM-DD`.")
 
-        # Mapeia candidatos da base para o esquema de cirurgias
+        # Mapeia candidatos da base para o esquema de cirurgias (com colunas legíveis)
         df_base_mapped = pd.DataFrame({
             "id": [None]*len(df_base),
             "Hospital": df_base["Hospital"],
@@ -396,8 +395,8 @@ with tabs[1]:
             "Prestador": df_base["Prestador"],
             "Data_Cirurgia": df_base["Data"],
             "Convenio": df_base["Convenio"],
-            "Procedimento_Tipo_ID": [None]*len(df_base),
-            "Situacao_ID": [None]*len(df_base),
+            "Procedimento_Tipo_ID": [None]*len(df_base),  # será preenchido ao salvar
+            "Situacao_ID": [None]*len(df_base),           # idem
             "Guia_AMHPTISS": ["" for _ in range(len(df_base))],
             "Guia_AMHPTISS_Complemento": ["" for _ in range(len(df_base))],
             "Fatura": ["" for _ in range(len(df_base))],
@@ -405,11 +404,11 @@ with tabs[1]:
             "created_at": [None]*len(df_base),
             "updated_at": [None]*len(df_base),
             "Fonte": ["Base"]*len(df_base),
-            "Tipo (nome)": ["" for _ in range(len(df_base))],
-            "Situação (nome)": ["" for _ in range(len(df_base))]
+            "Tipo (nome)": ["" for _ in range(len(df_base))],       # edição por nome
+            "Situação (nome)": ["" for _ in range(len(df_base))]    # edição por nome
         })
 
-        # União preferindo registros já existentes
+        # União preferindo registros já existentes (evita duplicar mesma chave)
         df_union = pd.concat([df_cir, df_base_mapped], ignore_index=True)
         df_union["_has_id"] = df_union["id"].notna().astype(int)
 
@@ -424,10 +423,13 @@ with tabs[1]:
         df_union.drop(columns=["_has_id", "_AttOrPac"], inplace=True)
 
         st.markdown("#### Lista de Cirurgias (com pacientes carregados da base)")
-        st.caption("Edite diretamente no grid. Linhas com Fonte=Base são novos candidatos; ao salvar, viram registros na tabela de cirurgias.")
+        st.caption("Edite diretamente no grid. Selecione **Tipo (nome)** e **Situação (nome)**; ao salvar, o app preenche os IDs correspondentes.")
+
+        # 👇 Oculta as colunas numéricas na visão do editor para evitar edição manual do ID
+        df_edit_view = df_union.drop(columns=["Procedimento_Tipo_ID", "Situacao_ID"], errors="ignore")
 
         edited_df = st.data_editor(
-            df_union,
+            df_edit_view,
             use_container_width=True,
             num_rows="fixed",
             column_config={
@@ -439,27 +441,23 @@ with tabs[1]:
                 "Prestador": st.column_config.TextColumn(),
                 "Data_Cirurgia": st.column_config.TextColumn(help="Formato livre, ex.: dd/MM/yyyy ou YYYY-MM-DD."),
                 "Convenio": st.column_config.TextColumn(),
-                # opções vindas do catálogo ativo, ordenadas
+
+                # ✅ Dropdown com os Tipos de serviço (ativos e ordenados)
                 "Tipo (nome)": st.column_config.SelectboxColumn(
                     options=[""] + tipo_nome_list,
-                    help="Selecione o tipo de procedimento cadastrado (apenas ativos)."
+                    help="Selecione o tipo de serviço cadastrado (apenas ativos)."
                 ),
+                # ✅ Dropdown com as Situações (ativas e ordenadas)
                 "Situação (nome)": st.column_config.SelectboxColumn(
                     options=[""] + sit_nome_list,
                     help="Selecione a situação da cirurgia (apenas ativas)."
                 ),
-                "Procedimento_Tipo_ID": st.column_config.NumberColumn(
-                    disabled=True,
-                    help="Preenchido ao salvar pela seleção de 'Tipo (nome)'."
-                ),
-                "Situacao_ID": st.column_config.NumberColumn(
-                    disabled=True,
-                    help="Preenchido ao salvar pela seleção de 'Situação (nome)'."
-                ),
+
                 "Guia_AMHPTISS": st.column_config.TextColumn(),
                 "Guia_AMHPTISS_Complemento": st.column_config.TextColumn(),
                 "Fatura": st.column_config.TextColumn(),
                 "Observacoes": st.column_config.TextColumn(),
+
                 "created_at": st.column_config.TextColumn(disabled=True),
                 "updated_at": st.column_config.TextColumn(disabled=True),
             },
@@ -472,7 +470,7 @@ with tabs[1]:
                 try:
                     edited_df = edited_df.copy()
 
-                    # Mapeia nomes selecionados → IDs
+                    # Reconstroi IDs a partir dos nomes escolhidos
                     edited_df["Procedimento_Tipo_ID"] = edited_df["Tipo (nome)"].map(lambda n: tipo_nome2id.get(n) if n else None)
                     edited_df["Situacao_ID"] = edited_df["Situação (nome)"].map(lambda n: sit_nome2id.get(n) if n else None)
 
@@ -483,6 +481,7 @@ with tabs[1]:
                         p = str(r.get("Prestador", "")).strip()
                         d = str(r.get("Data_Cirurgia", "")).strip()
 
+                        # Chave mínima para UPSERT (Atendimento ou Paciente + Hospital/Prestador/Data)
                         if h and p and d and (att or str(r.get("Paciente", "")).strip()):
                             payload = {
                                 "Hospital": h,
@@ -528,7 +527,9 @@ with tabs[1]:
             if st.button("⬇️ Exportar Excel (Lista atual)"):
                 try:
                     from export import to_formatted_excel_cirurgias
-                    excel_bytes = to_formatted_excel_cirurgias(edited_df.drop(columns=["Tipo (nome)", "Situação (nome)"], errors="ignore"))
+                    # Exporta sem as colunas de nomes de apoio
+                    export_df = edited_df.drop(columns=["Tipo (nome)", "Situação (nome)"], errors="ignore")
+                    excel_bytes = to_formatted_excel_cirurgias(export_df)
                     st.download_button(
                         label="Baixar Cirurgias.xlsx",
                         data=excel_bytes,
@@ -632,17 +633,12 @@ with tabs[2]:
     def _save_tipo_and_reset():
         try:
             suffix = st.session_state["tipo_form_reset"]
-            nome_key = f"tipo_nome_input_{suffix}"
-            ordem_key = f"tipo_ordem_input_{suffix}"
-            ativo_key = f"tipo_ativo_input_{suffix}"
-
-            tipo_nome = (st.session_state.get(nome_key) or "").strip()
+            tipo_nome = (st.session_state.get(f"tipo_nome_input_{suffix}") or "").strip()
             if not tipo_nome:
                 st.warning("Informe um nome de Tipo antes de salvar.")
                 return
-
-            tipo_ordem = int(st.session_state.get(ordem_key, next_tipo_ordem))
-            tipo_ativo = bool(st.session_state.get(ativo_key, True))
+            tipo_ordem = int(st.session_state.get(f"tipo_ordem_input_{suffix}", next_tipo_ordem))
+            tipo_ativo = bool(st.session_state.get(f"tipo_ativo_input_{suffix}", True))
 
             from db import upsert_procedimento_tipo, list_procedimento_tipos
             tid = upsert_procedimento_tipo(tipo_nome, int(tipo_ativo), int(tipo_ordem))
@@ -664,25 +660,14 @@ with tabs[2]:
 
     with colA:
         suffix = st.session_state["tipo_form_reset"]
-        st.text_input(
-            "Novo tipo / atualizar por nome",
-            placeholder="Ex.: Colecistectomia",
-            key=f"tipo_nome_input_{suffix}"
-        )
-        st.number_input(
-            "Ordem (para ordenar listagem)",
-            min_value=0, value=next_tipo_ordem, step=1,
-            key=f"tipo_ordem_input_{suffix}"
-        )
-        st.checkbox(
-            "Ativo", value=True,
-            key=f"tipo_ativo_input_{suffix}"
-        )
+        st.text_input("Novo tipo / atualizar por nome", placeholder="Ex.: Colecistectomia", key=f"tipo_nome_input_{suffix}")
+        st.number_input("Ordem (para ordenar listagem)", min_value=0, value=next_tipo_ordem, step=1, key=f"tipo_ordem_input_{suffix}")
+        st.checkbox("Ativo", value=True, key=f"tipo_ativo_input_{suffix}")
         st.button("Salvar tipo de procedimento", on_click=_save_tipo_and_reset)
 
         st.markdown("##### Cadastrar vários tipos (em lote)")
         bulk_suffix = st.session_state["tipo_bulk_reset"]
-        st.caption("Informe um tipo por linha. Ex.: Consulta\\nECG\\nRaio-X")
+        st.caption("Informe um tipo por linha. Ex.: Consulta\nECG\nRaio-X")
         st.text_area("Tipos (um por linha)", height=120, key=f"tipo_bulk_input_{bulk_suffix}")
         st.number_input("Ordem inicial (auto-incrementa)", min_value=0, value=next_tipo_ordem, step=1, key=f"tipo_bulk_ordem_{bulk_suffix}")
         st.checkbox("Ativo (padrão)", value=True, key=f"tipo_bulk_ativo_{bulk_suffix}")
@@ -690,13 +675,9 @@ with tabs[2]:
         def _save_tipos_bulk_and_reset():
             try:
                 suffix = st.session_state["tipo_bulk_reset"]
-                input_key = f"tipo_bulk_input_{suffix}"
-                ordem_key = f"tipo_bulk_ordem_{suffix}"
-                ativo_key = f"tipo_bulk_ativo_{suffix}"
-
-                raw_text = st.session_state.get(input_key, "") or ""
-                start_ordem = int(st.session_state.get(ordem_key, next_tipo_ordem))
-                ativo_padrao = bool(st.session_state.get(ativo_key, True))
+                raw_text = st.session_state.get(f"tipo_bulk_input_{suffix}", "") or ""
+                start_ordem = int(st.session_state.get(f"tipo_bulk_ordem_{suffix}", next_tipo_ordem))
+                ativo_padrao = bool(st.session_state.get(f"tipo_bulk_ativo_{suffix}", True))
 
                 linhas = [ln.strip() for ln in raw_text.splitlines()]
                 nomes = [ln for ln in linhas if ln]
@@ -835,17 +816,12 @@ with tabs[2]:
     def _save_sit_and_reset():
         try:
             suffix = st.session_state["sit_form_reset"]
-            nome_key = f"sit_nome_input_{suffix}"
-            ordem_key = f"sit_ordem_input_{suffix}"
-            ativo_key = f"sit_ativo_input_{suffix}"
-
-            sit_nome = (st.session_state.get(nome_key) or "").strip()
+            sit_nome = (st.session_state.get(f"sit_nome_input_{suffix}") or "").strip()
             if not sit_nome:
                 st.warning("Informe um nome de Situação antes de salvar.")
                 return
-
-            sit_ordem = int(st.session_state.get(ordem_key, next_sit_ordem))
-            sit_ativo = bool(st.session_state.get(ativo_key, True))
+            sit_ordem = int(st.session_state.get(f"sit_ordem_input_{suffix}", next_sit_ordem))
+            sit_ativo = bool(st.session_state.get(f"sit_ativo_input_{suffix}", True))
 
             from db import upsert_cirurgia_situacao, list_cirurgia_situacoes
             sid = upsert_cirurgia_situacao(sit_nome, int(sit_ativo), int(sit_ordem))
@@ -1014,7 +990,7 @@ with tabs[3]:
     with st.expander("ℹ️ Ajuda / Diagnóstico", expanded=False):
         st.markdown("""
         - **Status**: escolha **Ativos** para ver apenas os que aparecem na Aba **Cirurgias** (dropdown “Tipo (nome)”).
-        - **Ordenação**: por padrão ordenamos por **ordem**.
+        - **Ordenação**: por padrão ordenamos por **ordem** e depois por **nome**.
         - **Busca**: digite parte do nome e pressione Enter.
         - **Paginação**: ajuste conforme necessário.
         - **Exportar**: baixa exatamente o que está filtrado/ordenado.
