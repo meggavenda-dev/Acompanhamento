@@ -1,234 +1,198 @@
-
-# app.py
 import os
 import streamlit as st
 import pandas as pd
-from db import init_db, upsert_dataframe, read_all, DB_PATH, count_all
-from processing import process_uploaded_file
-from export import to_formatted_excel_by_hospital
+from datetime import datetime
 
-# --- GitHub sync (baixar/subir o .db) ---
+# Importações de banco de dados e utilitários
+from db import (
+    init_db, upsert_dataframe, read_all, DB_PATH, count_all,
+    delete_all_pacientes, delete_all_cirurgias, delete_all_catalogos, 
+    vacuum, dispose_engine, reset_db_file,
+    list_procedimento_tipos, list_cirurgia_situacoes, list_cirurgias,
+    insert_or_update_cirurgia, find_registros_para_prefill, delete_cirurgia,
+    upsert_procedimento_tipo, set_procedimento_tipo_status,
+    upsert_cirurgia_situacao, set_cirurgia_situacao_status
+)
+from processing import process_uploaded_file
+from export import to_formatted_excel_by_hospital, to_formatted_excel_cirurgias
+
+# --- Sincronização GitHub ---
+GITHUB_SYNC_AVAILABLE = False
 try:
     from github_sync import download_db_from_github, upload_db_to_github
     GITHUB_SYNC_AVAILABLE = True
-except Exception:
-    GITHUB_SYNC_AVAILABLE = False
+except:
+    pass
 
-# ---- Config GitHub (usa st.secrets; sem UI) ----
-GH_OWNER = st.secrets.get("GH_OWNER", "seu-usuario-ou-org")
-GH_REPO = st.secrets.get("GH_REPO", "seu-repo")
+# Configurações de Segredos (Streamlit Cloud Secrets)
+GH_OWNER = st.secrets.get("GH_OWNER", "")
+GH_REPO = st.secrets.get("GH_REPO", "")
 GH_BRANCH = st.secrets.get("GH_BRANCH", "main")
-GH_PATH_IN_REPO = st.secrets.get("GH_DB_PATH", "data/exemplo.db")  # deve coincidir com DB_PATH em db.py
+GH_PATH_IN_REPO = st.secrets.get("GH_DB_PATH", "data/exemplo.db")
 GITHUB_TOKEN_OK = bool(st.secrets.get("GITHUB_TOKEN", ""))
 
-st.set_page_config(page_title="Pacientes por Dia, Prestador e Hospital", layout="wide")
-
-st.title("Pacientes únicos por data, prestador e hospital")
-st.caption("Download automático do banco no GitHub → Upload → herança/filtragem/deduplicação → Hospital (lista) → editar Paciente → salvar → exportar → commit automático no GitHub")
-
-# 1) Baixa o DB do GitHub (se existir) antes de inicializar tabelas
-if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
-    try:
-        downloaded = download_db_from_github(
-            owner=GH_OWNER,
-            repo=GH_REPO,
-            path_in_repo=GH_PATH_IN_REPO,
-            branch=GH_BRANCH,
-            local_db_path=DB_PATH
-        )
-        if downloaded:
-            st.success("Banco baixado do GitHub.")
-        else:
-            st.info("Banco não encontrado no GitHub (primeiro uso). Será criado localmente ao salvar.")
-    except Exception as e:
-        st.warning("Não foi possível baixar o banco do GitHub. Verifique token/permissões em st.secrets.")
-        st.exception(e)
-
-# Inicializa DB (cria tabela/índices se necessário)
+# Configuração da Página
+st.set_page_config(page_title="Gestão de Pacientes e Cirurgias", layout="wide")
 init_db()
 
-# ---------------- Configuração dos Prestadores ----------------
-st.subheader("Prestadores alvo")
-prestadores_default = ["JOSE.ADORNO", "CASSIO CESAR", "FERNANDO AND", "SIMAO.MATOS"]
-prestadores_text = st.text_area(
-    "Informe os prestadores (um por linha)",
-    value="\n".join(prestadores_default),
-    height=120,
-    help="A lista é usada para filtrar os registros. A comparação é case-insensitive."
-)
-prestadores_lista = [p.strip() for p in prestadores_text.splitlines() if p.strip()]
-
-# ---------------- Hospital do arquivo (lista fixa) ----------------
-st.subheader("Hospital deste arquivo")
-hospital_opcoes = [
-    "Hospital Santa Lucia Sul",
-    "Hospital Santa Lucia Norte",
-    "Hospital Maria Auxiliadora",
-]
-selected_hospital = st.selectbox(
-    "Selecione o Hospital referente à planilha enviada",
-    options=hospital_opcoes,
-    index=0,
-    help="O hospital selecionado será aplicado a todas as linhas processadas deste arquivo."
-)
-
-# ---------------- Upload de Arquivo ----------------
-st.subheader("Upload de planilha (CSV ou Excel)")
-uploaded_file = st.file_uploader(
-    "Escolha o arquivo",
-    type=["csv", "xlsx", "xls"],
-    help="Aceita CSV 'bruto' (sem cabeçalho padronizado) ou planilhas estruturadas."
-)
-
-# ---- Estado para manter DF e controle de uploads ----
-if "df_final" not in st.session_state:
-    st.session_state.df_final = None
-if "last_upload_id" not in st.session_state:
-    st.session_state.last_upload_id = None
-if "editor_key" not in st.session_state:
-    st.session_state.editor_key = "editor_pacientes_initial"
-
-# Gera um ID único do upload (arquivo + hospital) para detectar nova importação
-def _make_upload_id(file, hospital: str) -> str:
-    name = getattr(file, "name", "sem_nome")
-    size = getattr(file, "size", 0)
-    # hospital influencia o processamento; trocando hospital também deve resetar
-    return f"{name}-{size}-{hospital.strip()}"
-
-# Botão para limpar e recomeçar (opcional)
-col_reset1, col_reset2 = st.columns(2)
-with col_reset1:
-    if st.button("🧹 Limpar tabela / reset"):
-        st.session_state.df_final = None
-        st.session_state.last_upload_id = None
-        st.session_state.editor_key = "editor_pacientes_reset"
-        st.success("Tabela limpa. Faça novo upload para reprocessar.")
-
-# Processamento (com reset automático do editor em nova importação)
-if uploaded_file is not None:
-    current_upload_id = _make_upload_id(uploaded_file, selected_hospital)
-
-    # Se for uma nova importação (arquivo/hospital diferente), zera o DF e editor
-    if st.session_state.last_upload_id != current_upload_id:
-        st.session_state.df_final = None
-        st.session_state.editor_key = f"editor_pacientes_{current_upload_id}"
-        st.session_state.last_upload_id = current_upload_id
-
-    with st.spinner("Processando arquivo com a lógica consolidada..."):
+# --- Funções de Apoio ---
+def _sync_gh(message):
+    """Encapsula a lógica de upload para o GitHub."""
+    if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
         try:
-            df_final = process_uploaded_file(uploaded_file, prestadores_lista, selected_hospital.strip())
-            if df_final is None or len(df_final) == 0:
-                st.warning("Nenhuma linha após processamento. Verifique a lista de prestadores e o conteúdo do arquivo.")
-                st.session_state.df_final = None
-            else:
-                st.session_state.df_final = df_final
+            success = upload_db_to_github(
+                owner=GH_OWNER, repo=GH_REPO, branch=GH_BRANCH,
+                path_in_repo=GH_PATH_IN_REPO, local_db_path=DB_PATH,
+                commit_message=message
+            )
+            if success: st.toast(f"✅ Sincronizado: {message}")
         except Exception as e:
-            st.error("Falha ao processar o arquivo. Verifique o formato da planilha/CSV.")
-            st.exception(e)
+            st.error(f"Erro na sincronização: {e}")
 
-# ---------------- Revisão / Edição ----------------
-if st.session_state.df_final is not None and len(st.session_state.df_final) > 0:
-    st.success(f"Processamento concluído! Linhas: {len(st.session_state.df_final)}")
+# --- Sidebar: Configurações e Área de Risco ---
+with st.sidebar:
+    st.title("⚙️ Painel de Controle")
+    
+    if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
+        st.subheader("Sincronização")
+        if st.button("🔽 Baixar Banco (Nuvem → Local)"):
+            if download_db_from_github(owner=GH_OWNER, repo=GH_REPO, local_db_path=DB_PATH):
+                st.success("Banco atualizado!")
+                st.rerun()
 
-    st.subheader("Revisar e editar nomes de Paciente (opcional)")
-    st.caption("Edite apenas a coluna 'Paciente' se necessário. As demais estão bloqueadas para evitar alterações acidentais.")
+    st.markdown("---")
+    st.subheader("🧨 Área de Risco")
+    st.caption("Ações irreversíveis. Use com cautela.")
+    
+    confirmar_permissao = st.checkbox("Liberar botões de exclusão")
+    input_reset = st.text_input("Digite **RESET** para confirmar")
+    pode_executar = confirmar_permissao and input_reset == "RESET"
 
-    # Editor com restrição: somente 'Paciente' editável
-    df_to_edit = st.session_state.df_final.sort_values(
-        ["Hospital", "Ano", "Mes", "Dia", "Paciente", "Prestador"]
-    ).reset_index(drop=True)
+    if st.button("Limpar Tabela Pacientes", disabled=not pode_executar):
+        delete_all_pacientes()
+        vacuum()
+        _sync_gh("Limpeza manual: Pacientes")
+        st.rerun()
 
-    edited_df = st.data_editor(
-        df_to_edit,
-        use_container_width=True,
-        num_rows="fixed",  # não permite adicionar linhas
-        column_config={
-            "Hospital": st.column_config.TextColumn(disabled=True),
-            "Ano": st.column_config.NumberColumn(disabled=True),
-            "Mes": st.column_config.NumberColumn(disabled=True),
-            "Dia": st.column_config.NumberColumn(disabled=True),
-            "Data": st.column_config.TextColumn(disabled=True),
-            "Atendimento": st.column_config.TextColumn(disabled=True),
-            "Aviso": st.column_config.TextColumn(disabled=True),
-            "Convenio": st.column_config.TextColumn(disabled=True),
-            "Prestador": st.column_config.TextColumn(disabled=True),
-            "Quarto": st.column_config.TextColumn(disabled=True),
-            # Paciente permanece editável
-            "Paciente": st.column_config.TextColumn(help="Clique para editar o nome do paciente."),
-        },
-        hide_index=True,
-        key=st.session_state.editor_key  # chave única por importação
-    )
+    if st.button("Limpar Tabela Cirurgias", disabled=not pode_executar):
+        delete_all_cirurgias()
+        vacuum()
+        _sync_gh("Limpeza manual: Cirurgias")
+        st.rerun()
 
-    # Atualiza o estado com as edições realizadas
-    st.session_state.df_final = edited_df
+    if st.button("🗑️ RESET TOTAL (Deletar .db)", type="primary", disabled=not pode_executar):
+        reset_db_file()
+        _sync_gh("Reset total do sistema")
+        st.rerun()
 
-    # ---------------- Gravar no Banco + commit automático no GitHub ----------------
-    st.subheader("Persistência")
-    if st.button("Salvar no banco (exemplo.db)"):
-        try:
-            # 1) UPSERT local
-            upsert_dataframe(st.session_state.df_final)
+# --- Interface Principal ---
+st.title("Gestão de Pacientes e Cirurgias")
 
-            # 2) Contagem para feedback
-            total = count_all()
-            st.success(f"Dados salvos com sucesso em exemplo.db. Total de linhas no banco: {total}")
+tabs = st.tabs(["📥 Importação & Pacientes", "🩺 Cirurgias", "📚 Cadastro (Catálogos)"])
 
-            # 3) Commit/push automático para GitHub
-            if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
-                try:
-                    ok = upload_db_to_github(
-                        owner=GH_OWNER,
-                        repo=GH_REPO,
-                        path_in_repo=GH_PATH_IN_REPO,
-                        branch=GH_BRANCH,
-                        local_db_path=DB_PATH,
-                        commit_message="Atualiza banco SQLite via app (salvar no banco)"
-                    )
-                    if ok:
-                        st.success("Sincronização automática com GitHub concluída.")
-                except Exception as e:
-                    st.error("Falha ao sincronizar com GitHub (commit automático).")
-                    st.exception(e)
+# === ABA 1: IMPORTAÇÃO ===
+with tabs[0]:
+    st.header("Processamento de Planilhas")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        prestadores_text = st.text_area("Prestadores Alvo (um por linha)", value="JOSE ADORNO\nCASSIO CESAR")
+        prestadores_lista = [p.strip() for p in prestadores_text.splitlines() if p.strip()]
+    
+    with col2:
+        hospital_selecionado = st.selectbox("Hospital de Origem", [
+            "Hospital Santa Lucia Sul", "Hospital Santa Lucia Norte", "Hospital Maria Auxiliadora"
+        ])
+        uploaded_file = st.file_uploader("Upload CSV ou Excel", type=["csv", "xlsx"])
 
-            # 4) Limpa DF e editor para nova importação
-            st.session_state.df_final = None
-            st.session_state.editor_key = "editor_pacientes_after_save"
+    if uploaded_file:
+        df_result = process_uploaded_file(uploaded_file, prestadores_lista, hospital_selecionado)
+        
+        if not df_result.empty:
+            st.subheader("Dados Processados")
+            # Editor para correções de última hora nos nomes
+            df_editado = st.data_editor(df_result, use_container_width=True, hide_index=True)
+            
+            if st.button("💾 Salvar Pacientes no Banco de Dados"):
+                upsert_dataframe(df_editado)
+                _sync_gh(f"Importação: {len(df_editado)} registros - {hospital_selecionado}")
+                st.success("Dados persistidos com sucesso!")
+        else:
+            st.warning("Nenhum dado encontrado para os prestadores informados.")
 
-        except Exception as e:
-            st.error("Falha ao salvar no banco. Veja detalhes abaixo:")
-            st.exception(e)
+# === ABA 2: CIRURGIAS ===
+with tabs[1]:
+    st.header("Registro de Cirurgias")
+    
+    # Filtros para carregar pacientes da base
+    f_col1, f_col2, f_col3 = st.columns(3)
+    with f_col1: h_filtro = st.selectbox("Filtrar Hospital", ["Hospital Santa Lucia Sul", "Hospital Santa Lucia Norte"], key="h_f")
+    with f_col2: ano_f = st.number_input("Ano", value=datetime.now().year)
+    with f_col3: mes_f = st.number_input("Mês", value=datetime.now().month, min_value=1, max_value=12)
 
-    # ---------------- Exportar Excel (por Hospital) ----------------
-    st.subheader("Exportar Excel (multi-aba por Hospital)")
-    excel_bytes = to_formatted_excel_by_hospital(st.session_state.df_final)
-    st.download_button(
-        label="Baixar Excel por Hospital",
-        data=excel_bytes,
-        file_name="Pacientes_por_dia_prestador_hospital.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    # Buscar dados para o editor
+    tipos_cat = {r[1]: r[0] for r in list_procedimento_tipos(only_active=True)}
+    sits_cat = {r[1]: r[0] for r in list_cirurgia_situacoes(only_active=True)}
+    
+    base_pacientes = find_registros_para_prefill(h_filtro, ano_f, mes_f)
+    
+    if base_pacientes:
+        df_cirurgias = pd.DataFrame(base_pacientes, columns=["Hospital", "Data", "Atendimento", "Paciente", "Convenio", "Prestador"])
+        
+        # Adiciona colunas de cirurgia
+        df_cirurgias["Tipo (nome)"] = ""
+        df_cirurgias["Situação (nome)"] = ""
+        df_cirurgias["Guia/Fatura"] = ""
 
-# ---------------- Conteúdo atual do banco ----------------
+        df_final_cir = st.data_editor(
+            df_cirurgias,
+            column_config={
+                "Tipo (nome)": st.column_config.SelectboxColumn("Procedimento", options=list(tipos_cat.keys())),
+                "Situação (nome)": st.column_config.SelectboxColumn("Status", options=list(sits_cat.keys())),
+            },
+            use_container_width=True, hide_index=True
+        )
+
+        if st.button("💾 Salvar/Atualizar Cirurgias"):
+            for _, row in df_final_cir.iterrows():
+                if row["Tipo (nome)"] != "" and row["Situação (nome)"] != "":
+                    payload = {
+                        "Hospital": row["Hospital"], "Atendimento": row["Atendimento"],
+                        "Paciente": row["Paciente"], "Prestador": row["Prestador"],
+                        "Data_Cirurgia": row["Data"], "Convenio": row["Convenio"],
+                        "Procedimento_Tipo_ID": tipos_cat.get(row["Tipo (nome)"]),
+                        "Situacao_ID": sits_cat.get(row["Situação (nome)"]),
+                        "Fatura": row["Guia/Fatura"]
+                    }
+                    insert_or_update_cirurgia(payload)
+            _sync_gh("Atualização em massa de cirurgias")
+            st.success("Cirurgias atualizadas!")
+
+# === ABA 3: CADASTRO (CATÁLOGOS) ===
+with tabs[2]:
+    st.header("Configuração de Catálogos")
+    c1, c2 = st.columns(2)
+    
+    with c1:
+        st.subheader("Tipos de Procedimento")
+        novo_tipo = st.text_input("Novo Tipo (Ex: Colecistectomia)")
+        if st.button("Adicionar Tipo") and novo_tipo:
+            upsert_procedimento_tipo(novo_tipo, 1, 0)
+            st.rerun()
+            
+        tipos_db = pd.DataFrame(list_procedimento_tipos(only_active=False), columns=["ID", "Nome", "Ativo", "Ordem"])
+        st.data_editor(tipos_db, use_container_width=True, hide_index=True, key="ed_tipos")
+
+    with c2:
+        st.subheader("Situações")
+        nova_sit = st.text_input("Nova Situação (Ex: Realizada)")
+        if st.button("Adicionar Situação") and nova_sit:
+            upsert_cirurgia_situacao(nova_sit, 1, 0)
+            st.rerun()
+            
+        sits_db = pd.DataFrame(list_cirurgia_situacoes(only_active=False), columns=["ID", "Nome", "Ativo", "Ordem"])
+        st.data_editor(sits_db, use_container_width=True, hide_index=True, key="ed_sits")
+
+# Footer com estatísticas
 st.divider()
-st.subheader("Conteúdo atual do banco (exemplo.db)")
-rows = read_all()
-if rows:
-    cols = ["Hospital", "Ano", "Mes", "Dia", "Data", "Atendimento", "Paciente", "Aviso", "Convenio", "Prestador", "Quarto"]
-    db_df = pd.DataFrame(rows, columns=cols)
-    st.dataframe(
-        db_df.sort_values(["Hospital", "Ano", "Mes", "Dia", "Paciente", "Prestador"]),
-        use_container_width=True
-    )
-
-    # Exportar direto do banco também (multi-aba por hospital)
-    st.subheader("Exportar Excel por Hospital (dados do banco)")
-    excel_bytes_db = to_formatted_excel_by_hospital(db_df)
-    st.download_button(
-        label="Baixar Excel (Banco)",
-        data=excel_bytes_db,
-        file_name="Pacientes_por_dia_prestador_hospital_banco.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-else:
-    st.info("Banco ainda sem dados. Faça o upload e clique em 'Salvar no banco'.")
+st.caption(f"📊 Total de registros no banco: {count_all()} | Local do Banco: {DB_PATH}")
