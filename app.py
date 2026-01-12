@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 import os
 from datetime import datetime
-import pandas as pd
 import streamlit as st
+import pandas as pd
 
 from db import init_db, upsert_dataframe, read_all, DB_PATH, count_all
 from processing import process_uploaded_file
@@ -176,6 +176,7 @@ tabs = st.tabs([
     "📄 Tipos (Lista)"
 ])
 
+
 # ====================================================================================
 # 📥 Aba 1: Importação & Pacientes
 # ====================================================================================
@@ -275,7 +276,8 @@ with tabs[0]:
             hide_index=True,
             key=st.session_state.editor_key
         )
-        edited_df = pd.DataFrame(edited_df)  # tipo correto após editor
+        # ✅ Garantir tipo correto após o editor
+        edited_df = pd.DataFrame(edited_df)
         st.session_state.df_final = edited_df
 
         st.markdown("#### Persistência")
@@ -309,6 +311,7 @@ with tabs[0]:
                 st.exception(e)
 
         st.markdown("#### Exportar Excel (multi-aba por Hospital)")
+        # ✅ Garantir DataFrame na exportação
         df_for_export = pd.DataFrame(st.session_state.df_final)
         excel_bytes = to_formatted_excel_by_hospital(df_for_export)
         st.download_button(
@@ -355,7 +358,6 @@ with tabs[1]:
     )
     from export import to_formatted_excel_cirurgias
 
-    # Filtros principais
     st.markdown("#### Filtros para carregar pacientes na Lista de Cirurgias")
     colF0, colF1, colF2, colF3 = st.columns([1, 1, 1, 1])
     with colF0:
@@ -384,17 +386,17 @@ with tabs[1]:
     )
     prestadores_lista_filtro = [p.strip() for p in prestadores_filtro.split(";") if p.strip()]
 
-    # Filtros adicionais (opcionais)
-    st.markdown("##### Filtros adicionais (opcionais)")
-    col_extra1, col_extra2, col_extra3, col_extra4 = st.columns([1, 1, 1, 1])
-    with col_extra1:
-        filtro_convenio = st.text_input("Convênio contém", value="")
-    with col_extra2:
-        filtro_paciente = st.text_input("Paciente contém", value="")
-    with col_extra3:
-        filtro_data_ini = st.text_input("Data início (dd/MM/yyyy)", value="")
-    with col_extra4:
-        filtro_data_fim = st.text_input("Data fim (dd/MM/yyyy)", value="")
+    # ---- Recarregar catálogos (Tipos/Situações) ----
+    col_refresh, col_refresh_info = st.columns([1.5, 2.5])
+    with col_refresh:
+        if st.button("🔄 Recarregar catálogos (Tipos/Situações)"):
+            st.session_state["catalog_refresh_ts"] = datetime.now().isoformat(timespec="seconds")
+            st.success(f"Catálogos recarregados às {st.session_state['catalog_refresh_ts']}")
+
+    with col_refresh_info:
+        ts = st.session_state.get("catalog_refresh_ts")
+        if ts:
+            st.caption(f"Último recarregamento: {ts}")
 
     # -------- Carregar catálogos (para dropdowns do grid) --------
     tipos_rows = list_procedimento_tipos(only_active=True)
@@ -421,9 +423,14 @@ with tabs[1]:
         sit_nome2id = {}
         sit_id2nome = {}
 
+    # Avisos se catálogos estiverem vazios
+    if not tipo_nome_list:
+        st.warning("Nenhum **Tipo de Procedimento** ativo encontrado. Cadastre na aba **📚 Cadastro (Tipos & Situações)** e marque como **Ativo**.")
+    if not sit_nome_list:
+        st.warning("Nenhuma **Situação da Cirurgia** ativa encontrada. Cadastre na aba **📚 Cadastro (Tipos & Situações)** e marque como **Ativo**.")
+
     # -------- Montar a Lista de Cirurgias com união (Cirurgias + Base) --------
     try:
-        # Carrega cirurgias já salvas
         rows_cir = list_cirurgias(hospital=hosp_cad, ano_mes=None, prestador=None)
         df_cir = pd.DataFrame(rows_cir, columns=[
             "id", "Hospital", "Atendimento", "Paciente", "Prestador", "Data_Cirurgia",
@@ -444,7 +451,6 @@ with tabs[1]:
         df_cir["Tipo (nome)"] = df_cir["Procedimento_Tipo_ID"].map(tipo_id2nome).fillna("")
         df_cir["Situação (nome)"] = df_cir["Situacao_ID"].map(sit_id2nome).fillna("")
 
-        # Carrega candidatos da base
         base_rows = find_registros_para_prefill(
             hosp_cad,
             ano=int(ano_cad) if usar_periodo else None,
@@ -458,30 +464,7 @@ with tabs[1]:
             for col in ["Hospital", "Data", "Atendimento", "Paciente", "Convenio", "Prestador"]:
                 df_base[col] = df_base[col].fillna("").astype(str)
 
-        # Aplica filtros adicionais aos candidatos da base
-        if filtro_convenio.strip():
-            df_base = df_base[df_base["Convenio"].astype(str).str.contains(filtro_convenio.strip(), case=False, na=False)]
-        if filtro_paciente.strip():
-            df_base = df_base[df_base["Paciente"].astype(str).str.contains(filtro_paciente.strip(), case=False, na=False)]
-        # Filtro por intervalo de data (dd/MM/yyyy)
-        def _parse_br_date(s: str):
-            try:
-                return pd.to_datetime(s, format="%d/%m/%Y", errors="coerce")
-            except Exception:
-                return pd.NaT
-        if filtro_data_ini.strip() or filtro_data_fim.strip():
-            df_base["_Data"] = pd.to_datetime(df_base["Data"], format="%d/%m/%Y", errors="coerce")
-            if filtro_data_ini.strip():
-                di = _parse_br_date(filtro_data_ini.strip())
-                if pd.notna(di):
-                    df_base = df_base[df_base["_Data"] >= di]
-            if filtro_data_fim.strip():
-                df = _parse_br_date(filtro_data_fim.strip())
-                if pd.notna(df):
-                    df_base = df_base[df_base["_Data"] <= df]
-            df_base.drop(columns=["_Data"], inplace=True, errors="ignore")
-
-        st.info(f"Cirurgias já salvas: {len(df_cir)} | Candidatos da base (após filtros): {len(df_base)}")
+        st.info(f"Cirurgias já salvas: {len(df_cir)} | Candidatos da base: {len(df_base)}")
 
         if df_base.empty:
             st.warning("Nenhum candidato carregado da base com os filtros atuais.")
@@ -489,8 +472,7 @@ with tabs[1]:
                 st.markdown("- Verifique o **Hospital** (coincide com Aba 1?).")
                 st.markdown("- Ajuste **Ano/Mês** ou desmarque **Filtrar por Ano/Mês**.")
                 st.markdown("- Deixe **Prestadores** vazio para não filtrar.")
-                st.markdown("- Use filtros adicionais com termos exatos (Convênio/Paciente).")
-                st.markdown("- O filtro de datas aceita formato `dd/MM/yyyy`.")
+                st.markdown("- O filtro aceita datas em `dd/MM/yyyy` e `YYYY-MM-DD`.")
 
         # Mapeia candidatos da base para o esquema de cirurgias (com colunas legíveis)
         df_base_mapped = pd.DataFrame({
@@ -508,95 +490,11 @@ with tabs[1]:
             "Fatura": ["" for _ in range(len(df_base))],
             "Observacoes": ["" for _ in range(len(df_base))],
             "created_at": [None]*len(df_base),
-            "updated_at": [None]*len(df_base],
+            "updated_at": [None]*len(df_base),
             "Fonte": ["Base"]*len(df_base),
             "Tipo (nome)": ["" for _ in range(len(df_base))],  # edição por nome
             "Situação (nome)": ["" for _ in range(len(df_base))]  # edição por nome
         })
-
-        # --- Seleção manual dos candidatos para importar ---
-        st.markdown("#### Selecione os candidatos da base que deseja importar como Cirurgias")
-        st.caption("Marque apenas os que devem virar registros de cirurgia. O tipo e situação podem ser preenchidos depois.")
-
-        df_select_view = df_base_mapped.copy()
-        if "Selecionar" not in df_select_view.columns:
-            df_select_view["Selecionar"] = False
-
-        edited_select_df = st.data_editor(
-            df_select_view[
-                [
-                    "Selecionar",
-                    "Hospital", "Atendimento", "Paciente", "Prestador",
-                    "Data_Cirurgia", "Convenio"
-                ]
-            ],
-            use_container_width=True,
-            num_rows="fixed",
-            column_config={
-                "Selecionar": st.column_config.CheckboxColumn(),
-                "Hospital": st.column_config.TextColumn(disabled=True),
-                "Atendimento": st.column_config.TextColumn(),
-                "Paciente": st.column_config.TextColumn(),
-                "Prestador": st.column_config.TextColumn(disabled=True),
-                "Data_Cirurgia": st.column_config.TextColumn(disabled=True),
-                "Convenio": st.column_config.TextColumn(),
-            },
-            key="editor_candidatos_base_select"
-        )
-        edited_select_df = pd.DataFrame(edited_select_df)
-
-        col_imp1, col_imp2 = st.columns([1, 3])
-        with col_imp1:
-            if st.button("📥 Importar selecionados (somente marcados)"):
-                try:
-                    df_sel = edited_select_df[edited_select_df["Selecionar"] == True].copy()
-                    if df_sel.empty:
-                        st.warning("Nenhum candidato marcado. Selecione ao menos uma linha.")
-                    else:
-                        num_ok, num_skip = 0, 0
-                        for _, r in df_sel.iterrows():
-                            h = str(r.get("Hospital", "")).strip()
-                            p = str(r.get("Prestador", "")).strip()
-                            d = str(r.get("Data_Cirurgia", "")).strip()
-                            att = str(r.get("Atendimento", "")).strip()
-                            pac = str(r.get("Paciente", "")).strip()
-
-                            if h and p and d and (att or pac):
-                                payload = {
-                                    "Hospital": h,
-                                    "Atendimento": att,
-                                    "Paciente": pac,
-                                    "Prestador": p,
-                                    "Data_Cirurgia": d,
-                                    "Convenio": str(r.get("Convenio", "")).strip(),
-                                    "Procedimento_Tipo_ID": None,
-                                    "Situacao_ID": None,
-                                    "Guia_AMHPTISS": "",
-                                    "Guia_AMHPTISS_Complemento": "",
-                                    "Fatura": "",
-                                    "Observacoes": "",
-                                }
-                                try:
-                                    insert_or_update_cirurgia(payload)
-                                    num_ok += 1
-                                except Exception:
-                                    num_skip += 1
-                            else:
-                                num_skip += 1
-
-                        st.success(f"Importação concluída. {num_ok} linha(s) importadas; {num_skip} ignorada(s).")
-                        # Opcional: recarregar a aba para refletir as cirurgias recém-importadas
-                        # st.rerun()
-                except Exception as e:
-                    st.error("Falha ao importar selecionados.")
-                    st.exception(e)
-
-        with col_imp2:
-            st.info("Dica: depois de importar, use o grid de **Lista de Cirurgias** para preencher Tipo e Situação.")
-
-        st.divider()
-        st.markdown("#### Lista de Cirurgias (com pacientes carregados da base)")
-        st.caption("Edite diretamente no grid. Selecione **Tipo (nome)** e **Situação (nome)**; ao salvar, o app preenche os IDs correspondentes.")
 
         # União preferindo registros já existentes (evita duplicar mesma chave)
         df_union = pd.concat([df_cir, df_base_mapped], ignore_index=True)
@@ -611,6 +509,9 @@ with tabs[1]:
         df_union = df_union.sort_values(KEY_COLS + ["_has_id"], ascending=[True, True, True, True, False])
         df_union = df_union.drop_duplicates(subset=KEY_COLS, keep="first")
         df_union.drop(columns=["_has_id", "_AttOrPac"], inplace=True)
+
+        st.markdown("#### Lista de Cirurgias (com pacientes carregados da base)")
+        st.caption("Edite diretamente no grid. Selecione **Tipo (nome)** e **Situação (nome)**; ao salvar, o app preenche os IDs correspondentes.")
 
         # 👇 Oculta colunas ID/Fonte, numéricas e auditoria na visão do editor
         df_edit_view = df_union.drop(
@@ -630,10 +531,12 @@ with tabs[1]:
                 "Data_Cirurgia": st.column_config.TextColumn(help="Formato livre, ex.: dd/MM/yyyy ou YYYY-MM-DD."),
                 "Convenio": st.column_config.TextColumn(),
 
+                # ✅ Dropdown com os Tipos de serviço (ativos e ordenados)
                 "Tipo (nome)": st.column_config.SelectboxColumn(
                     options=[""] + tipo_nome_list,
                     help="Selecione o tipo de serviço cadastrado (apenas ativos)."
                 ),
+                # ✅ Dropdown com as Situações (ativas e ordenadas)
                 "Situação (nome)": st.column_config.SelectboxColumn(
                     options=[""] + sit_nome_list,
                     help="Selecione a situação da cirurgia (apenas ativas)."
@@ -646,6 +549,7 @@ with tabs[1]:
             },
             key="editor_lista_cirurgias_union"
         )
+        # ✅ Garantir tipo correto após o editor
         edited_df = pd.DataFrame(edited_df)
 
         colG1, colG2, colG3 = st.columns([1.2, 1, 1.8])
@@ -653,6 +557,7 @@ with tabs[1]:
             if st.button("💾 Salvar alterações da Lista (UPSERT em massa)"):
                 try:
                     edited_df = edited_df.copy()
+
                     # Reconstroi IDs a partir dos nomes escolhidos
                     edited_df["Procedimento_Tipo_ID"] = edited_df["Tipo (nome)"].map(lambda n: tipo_nome2id.get(n) if n else None)
                     edited_df["Situacao_ID"] = edited_df["Situação (nome)"].map(lambda n: sit_nome2id.get(n) if n else None)
@@ -664,11 +569,13 @@ with tabs[1]:
                         pac = str(r.get("Paciente", "")).strip()
                         p = str(r.get("Prestador", "")).strip()
                         d = str(r.get("Data_Cirurgia", "")).strip()
+
+                        # ✅ Chave mínima (resiliente): Hospital, Prestador, Data_Cirurgia e (Atendimento OU Paciente)
                         if h and p and d and (att or pac):
                             payload = {
                                 "Hospital": h,
-                                "Atendimento": att,
-                                "Paciente": pac,
+                                "Atendimento": att,  # pode ser vazio
+                                "Paciente": pac,     # pode ser vazio
                                 "Prestador": p,
                                 "Data_Cirurgia": d,
                                 "Convenio": str(r.get("Convenio", "")).strip(),
@@ -701,7 +608,8 @@ with tabs[1]:
                             st.error("Falha ao sincronizar com GitHub.")
                             st.exception(e)
 
-                    # Opcional: st.rerun()
+                    # (Opcional) Recarregar para refletir após salvar:
+                    # st.rerun()
 
                 except Exception as e:
                     st.error("Falha ao salvar alterações da lista.")
@@ -712,6 +620,7 @@ with tabs[1]:
                 try:
                     from export import to_formatted_excel_cirurgias
                     export_df = edited_df.drop(columns=["Tipo (nome)", "Situação (nome)"], errors="ignore")
+                    # ✅ Garantir DataFrame na exportação
                     export_df = pd.DataFrame(export_df)
                     excel_bytes = to_formatted_excel_cirurgias(export_df)
                     st.download_button(
@@ -1033,6 +942,7 @@ with tabs[2]:
         st.button("Salvar situação", on_click=_save_sit_and_reset)
 
     with colD:
+        # Botão de recarregar situações (cache do grid)
         st.markdown("##### Ações rápidas (Situações)")
         col_btn_sits, _ = st.columns([1.5, 2.5])
         with col_btn_sits:
