@@ -1,3 +1,4 @@
+
 # processing.py (aplicado com blindagem no parser e ffill na herança)
 import io
 import csv
@@ -44,31 +45,25 @@ PROCEDURE_HINTS = {
 }
 
 def _is_probably_procedure_token(tok) -> bool:
-    """
-    Heurística para sinalizar que um token parece ser texto de procedimento (não paciente).
-    Evita avaliar boolean de pd.NA.
-    """
     if tok is None or pd.isna(tok):
         return False
     T = str(tok).upper().strip()
-    # Sinais de procedimento/painel técnico
     if any(h in T for h in PROCEDURE_HINTS):
         return True
-    # Muitos sinais de "frase técnica"
-    if ("," in T) or ("/" in T) or ("(" in T) or (")" in T) or ("%" in T) or ("  " in T) or ("-" in T):
+    if any(x in T for x in [",", "/", "(", ")", "%", "-", "  "]):
         return True
-    # Muito longo para nome de pessoa
     if len(T) > 50:
         return True
     return False
 
 
 def _strip_accents(s: str) -> str:
-    """Remove acentos para comparações robustas (Prestador, etc.)."""
     if s is None or pd.isna(s):
         return ""
-    s = str(s)
-    return "".join(ch for ch in unicodedata.normalize("NFKD", s) if not unicodedata.combining(ch))
+    return "".join(
+        ch for ch in unicodedata.normalize("NFKD", str(s))
+        if not unicodedata.combining(ch)
+    )
 
 
 # =========================
@@ -76,18 +71,11 @@ def _strip_accents(s: str) -> str:
 # =========================
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Normaliza cabeçalhos para evitar KeyError:
-    - remove BOM, espaços no início/fim
-    - mapeia sinônimos/acento para nomes esperados
-    """
     if df is None or df.empty:
         return df
 
-    # strip + remove BOM
     df.columns = [str(c).replace("\ufeff", "").strip() for c in df.columns]
 
-    # mapa de sinônimos -> nomes esperados
     col_map = {
         "Convênio": "Convenio",
         "Convênio*": "Convenio",
@@ -107,14 +95,6 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 # =========================
 
 def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
-    """
-    Parser robusto para CSV 'bruto' (relatórios exportados),
-    lendo linha a linha em ordem original e extraindo campos.
-    Blindado para:
-      - Atualizar "Data" somente em cabeçalho "Data de Realização"
-      - Não confundir Paciente com Cirurgia/Convênio/Prestador
-      - Não deixar datas internas (ex.: 28/10/1983) contaminarem o bloco
-    """
     rows = []
     current_section = None
     current_date_str = None
@@ -126,7 +106,7 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
         "hora_inicio": None,
         "hora_fim": None,
         "quarto": None,
-        "data_locked": False,   # 🔒 trava data por atendimento
+        "data_locked": False,
         "data": None
     }
 
@@ -137,28 +117,22 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
         if not line:
             continue
 
-        # 1) Atualiza data SOMENTE em cabeçalho "Data de Realização" (prefix match), acento-insensível
         line_noacc = _strip_accents(line).upper()
         m_date_hdr = DATE_RE.search(line)
-        if ("DATA DE REALIZ" in line_noacc) and m_date_hdr:
+
+        if "DATA DE REALIZ" in line_noacc and m_date_hdr:
             yyyy = int(m_date_hdr.group(1).split("/")[-1])
             if 2010 <= yyyy <= 2035:
                 current_date_str = m_date_hdr.group(1)
                 ctx["data_locked"] = False
-            # cabeçalho não é linha de dados
             continue
 
-        # 2) Seção (zera contexto)
-        if ("CENTRO CIRUR" in line_noacc):
+        if "CENTRO CIRUR" in line_noacc:
             current_section = next((kw for kw in SECTION_KEYWORDS if kw in line_noacc), None)
-            ctx = {
-                "atendimento": None, "paciente": None, "aviso": None,
-                "hora_inicio": None, "hora_fim": None, "quarto": None,
-                "data_locked": False, "data": None
-            }
+            ctx = dict.fromkeys(ctx, None)
+            ctx["data_locked"] = False
             continue
 
-        # 3) Cabeçalho / rodapé / quebra de página
         if any(h in line for h in [
             "Hora", "Atendimento", "Paciente", "Convênio",
             "Prestador", "Anestesista", "Tipo Anestesia",
@@ -167,67 +141,39 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
             ctx["data_locked"] = False
             continue
 
-        # Tokeniza respeitando aspas
-        tokens = next(csv.reader([line]))
-        tokens = [t.strip() for t in tokens if t]
-        if not tokens:
-            continue
+        tokens = [t.strip() for t in next(csv.reader([line])) if t]
 
-        # 4) Horários
         time_idxs = [i for i, t in enumerate(tokens) if TIME_RE.match(t)]
         if not time_idxs:
             continue
 
         h0 = time_idxs[0]
-        h1 = h0 + 1 if (h0 + 1 < len(tokens) and TIME_RE.match(tokens[h0 + 1])) else None
+        h1 = h0 + 1 if h0 + 1 < len(tokens) and TIME_RE.match(tokens[h0 + 1]) else None
 
         hora_inicio = tokens[h0]
-        hora_fim = tokens[h1] if h1 is not None else None
+        hora_fim = tokens[h1] if h1 else None
 
-        # 5) Aviso (código imediatamente antes do primeiro horário)
-        aviso = None
-        if h0 - 1 >= 0 and re.fullmatch(r"\d{3,}", tokens[h0 - 1]):
-            aviso = tokens[h0 - 1]
+        aviso = tokens[h0 - 1] if h0 > 0 and re.fullmatch(r"\d{3,}", tokens[h0 - 1]) else None
 
-        # 6) Atendimento explícito (7-10 dígitos)
-        atendimento = None
-        for t in tokens:
-            if re.fullmatch(r"\d{7,10}", t):
-                atendimento = t
-                break
+        atendimento = next((t for t in tokens if re.fullmatch(r"\d{7,10}", t)), None)
 
-        # Atendimento novo destrava data
         if atendimento and atendimento != ctx["atendimento"]:
             ctx["data_locked"] = False
 
-        # Data final: cabeçalho válido → current_date_str; sem cabeçalho → NA
-        data_final = current_date_str if (current_date_str and not ctx["data_locked"]) else ctx["data"]
+        data_final = current_date_str if current_date_str and not ctx["data_locked"] else ctx["data"]
         if atendimento and not current_date_str:
             data_final = pd.NA
 
-        # 7) Paciente entre atendimento e antes do horário (blindado)
         paciente = None
-        upper_bound = (h0 - 2) if h0 is not None else (len(tokens) - 1)
-        if atendimento is not None and upper_bound >= 0:
-            try:
-                att_idx = tokens.index(atendimento)
-            except ValueError:
-                att_idx = None
-            if att_idx is not None and upper_bound >= att_idx + 1:
-                for j in range(att_idx + 1, upper_bound + 1):
-                    tj = tokens[j]
-                    if tj and HAS_LETTER_RE.search(tj) and not TIME_RE.match(tj) and not _is_probably_procedure_token(tj):
-                        paciente = tj
-                        break
+        if atendimento in tokens:
+            lb = tokens.index(atendimento) + 1
+            ub = h0 - 2
+            for t in tokens[lb:ub + 1]:
+                if HAS_LETTER_RE.search(t) and not _is_probably_procedure_token(t):
+                    paciente = t
+                    break
 
-        base_idx = h1 if h1 is not None else h0
-
-        cirurgia     = tokens[base_idx + 1] if base_idx + 1 < len(tokens) else None
-        convenio     = tokens[base_idx + 2] if base_idx + 2 < len(tokens) else None
-        prestador    = tokens[base_idx + 3] if base_idx + 3 < len(tokens) else None
-        anestesista  = tokens[base_idx + 4] if base_idx + 4 < len(tokens) else None
-        tipo         = tokens[base_idx + 5] if base_idx + 5 < len(tokens) else None
-        quarto       = tokens[base_idx + 6] if base_idx + 6 < len(tokens) else None
+        base_idx = h1 if h1 else h0
 
         rows.append({
             "Centro": current_section,
@@ -237,23 +183,22 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
             "Aviso": aviso,
             "Hora_Inicio": hora_inicio,
             "Hora_Fim": hora_fim,
-            "Cirurgia": cirurgia,
-            "Convenio": convenio,
-            "Prestador": prestador,
-            "Anestesista": anestesista,
-            "Tipo_Anestesia": tipo,
-            "Quarto": quarto,
+            "Cirurgia": tokens[base_idx + 1] if base_idx + 1 < len(tokens) else None,
+            "Convenio": tokens[base_idx + 2] if base_idx + 2 < len(tokens) else None,
+            "Prestador": tokens[base_idx + 3] if base_idx + 3 < len(tokens) else None,
+            "Anestesista": tokens[base_idx + 4] if base_idx + 4 < len(tokens) else None,
+            "Tipo_Anestesia": tokens[base_idx + 5] if base_idx + 5 < len(tokens) else None,
+            "Quarto": tokens[base_idx + 6] if base_idx + 6 < len(tokens) else None,
             "_row_idx": row_idx
         })
 
-        # 8) Atualiza contexto
         ctx.update({
             "atendimento": atendimento,
             "paciente": paciente,
             "aviso": aviso,
             "hora_inicio": hora_inicio,
             "hora_fim": hora_fim,
-            "quarto": quarto,
+            "quarto": None,
             "data": data_final,
             "data_locked": True if atendimento else False
         })
@@ -268,73 +213,37 @@ def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
 # =========================
 
 def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Herança linha-a-linha por Data, preservando ordem original do arquivo.
-
-    Regras:
-    - Aplica herança somente quando há Prestador na linha atual.
-    - 'Atendimento' e 'Aviso' herdam sempre que estiverem vazios e houver valor anterior.
-    - 'Paciente' só herda se o último paciente conhecido (no mesmo dia) NÃO estiver vazio;
-      caso contrário, mantém 'Paciente' em branco para edição posterior.
-    - Linhas que venham sem 'Paciente' permanecem em branco.
-    """
     if df is None or df.empty:
         return df
 
     df = df.copy()
     df.replace({"": pd.NA}, inplace=True)
 
-    if "_row_idx" not in df.columns:
-        df["_row_idx"] = range(len(df))
-
     if "Data" not in df.columns:
         return df
 
-    # Garante que Data exista em todas as linhas (apenas ffill)
     df["Data"] = df["Data"].ffill()
 
-    # Varre dia a dia na ordem original
     for _, grp in df.groupby("Data", sort=False):
-        last_att = pd.NA
-        last_pac = pd.NA
-        last_aviso = pd.NA
+        last_att = last_pac = last_aviso = pd.NA
 
         for i in grp.sort_values("_row_idx").index:
-            att = df.at[i, "Atendimento"] if "Atendimento" in df.columns else pd.NA
-            pac = df.at[i, "Paciente"] if "Paciente" in df.columns else pd.NA
-            av  = df.at[i, "Aviso"] if "Aviso" in df.columns else pd.NA
+            if pd.notna(df.at[i, "Atendimento"]):
+                last_att = df.at[i, "Atendimento"]
+            if pd.notna(df.at[i, "Paciente"]):
+                last_pac = df.at[i, "Paciente"]
+            if pd.notna(df.at[i, "Aviso"]):
+                last_aviso = df.at[i, "Aviso"]
 
-            # Atualiza memória com valores não vazios
-            if pd.notna(att) and str(att).strip():
-                last_att = att
-            if pd.notna(pac) and str(pac).strip():
-                last_pac = pac
-            if pd.notna(av) and str(av).strip():
-                last_aviso = av
-
-            # Herança só se houver Prestador na linha atual
-            has_prestador = (
-                "Prestador" in df.columns and
-                pd.notna(df.at[i, "Prestador"]) and
-                str(df.at[i, "Prestador"]).strip() != ""
-            )
-            if not has_prestador:
+            if pd.isna(df.at[i, "Prestador"]):
                 continue
 
-            # Atendimento: herda se vazio
-            if "Atendimento" in df.columns and (pd.isna(att) or str(att).strip() == "") and pd.notna(last_att):
+            if pd.isna(df.at[i, "Atendimento"]):
                 df.at[i, "Atendimento"] = last_att
-
-            # Aviso: herda se vazio
-            if "Aviso" in df.columns and (pd.isna(av) or str(av).strip() == "") and pd.notna(last_aviso):
+            if pd.isna(df.at[i, "Paciente"]):
+                df.at[i, "Paciente"] = last_pac
+            if pd.isna(df.at[i, "Aviso"]):
                 df.at[i, "Aviso"] = last_aviso
-
-            # Paciente: herda somente se last_pac não estiver vazio; senão mantém blank
-            if "Paciente" in df.columns and (pd.isna(pac) or str(pac).strip() == ""):
-                if pd.notna(last_pac) and str(last_pac).strip() != "":
-                    df.at[i, "Paciente"] = last_pac
-                else:
-                    df.at[i, "Paciente"] = pd.NA
 
     return df
 
@@ -344,19 +253,8 @@ def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
 # =========================
 
 def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
-    """
-    Entrada:
-      - upload: arquivo enviado pelo Streamlit (CSV/Excel/Texto)
-      - prestadores_lista: lista de prestadores alvo (strings)
-      - selected_hospital: nome do Hospital informado no app (aplicado a todas as linhas)
-
-    Saída:
-      DataFrame final com colunas:
-        Hospital, Ano, Mes, Dia, Data, Atendimento, Paciente, Aviso, Convenio, Prestador, Quarto
-    """
     name = upload.name.lower()
 
-    # 1) Ler arquivo (CSV/Excel ou texto bruto)
     if name.endswith(".xlsx"):
         df_in = pd.read_excel(upload, engine="openpyxl")
     elif name.endswith(".xls"):
@@ -364,145 +262,53 @@ def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
     elif name.endswith(".csv"):
         try:
             df_in = pd.read_csv(upload, sep=",", encoding="utf-8")
-            # Se não tem colunas suficientes, parseia como texto bruto
             if len(set(EXPECTED_COLS) & set(df_in.columns)) < 6:
                 upload.seek(0)
-                text = upload.read().decode("utf-8", errors="ignore")
-                df_in = _parse_raw_text_to_rows(text)
+                df_in = _parse_raw_text_to_rows(upload.read().decode("utf-8", errors="ignore"))
         except Exception:
             upload.seek(0)
-            text = upload.read().decode("utf-8", errors="ignore")
-            df_in = _parse_raw_text_to_rows(text)
+            df_in = _parse_raw_text_to_rows(upload.read().decode("utf-8", errors="ignore"))
     else:
-        text = upload.read().decode("utf-8", errors="ignore")
-        df_in = _parse_raw_text_to_rows(text)
+        df_in = _parse_raw_text_to_rows(upload.read().decode("utf-8", errors="ignore"))
 
-    # 1.1) Normaliza colunas e garante mínimas
     df_in = _normalize_columns(df_in)
-
-    if "_row_idx" not in df_in.columns:
-        df_in["_row_idx"] = range(len(df_in))
 
     for c in REQUIRED_COLS:
         if c not in df_in.columns:
-            # cria coluna vazia com alinhamento de índice
             df_in[c] = pd.NA
 
-    # >>> Guarda os valores CRUS pré-herança (usados na dedup híbrida e para refletir o relatório)
-    df_in["__pac_raw"]   = df_in["Paciente"]
-    df_in["__att_raw"]   = df_in["Atendimento"]
+    df_in["__pac_raw"] = df_in["Paciente"]
+    df_in["__att_raw"] = df_in["Atendimento"]
     df_in["__aviso_raw"] = df_in["Aviso"]
 
-    # Sanitiza SOMENTE o __pac_raw (remove “paciente = cirurgia” / texto técnico)
-    def _sanitize_one(pac_val, cir_val):
-        pac = "" if pd.isna(pac_val) else str(pac_val).strip()
-        cir = "" if pd.isna(cir_val) else str(cir_val).strip()
-        if pac == "":
-            return pd.NA
-        if cir and pac.upper() == cir.upper():
-            return pd.NA
-        if _is_probably_procedure_token(pac):
-            return pd.NA
-        return pac
-
-    df_in["__pac_raw"] = [
-        _sanitize_one(p, c) for p, c in zip(
-            df_in["__pac_raw"],
-            df_in.get("Cirurgia", pd.Series(index=df_in.index))
-        )
-    ]
-
-    # 2) Herança CONTROLADA (aplicada após salvar os CRUS)
     df = _herdar_por_data_ordem_original(df_in)
 
-    # 3) Filtro de prestadores (case-insensitive + remoção de acentos)
+    # ✅ ALTERAÇÃO FINAL (única)
+    df["Paciente"] = np.where(
+        df["__pac_raw"].isna() | (df["__pac_raw"].astype(str).str.strip() == ""),
+        df["Paciente"],
+        df["__pac_raw"]
+    )
+
     def norm(s):
-        s = "" if (s is None or pd.isna(s)) else str(s)
-        # remove acentos e normaliza
-        s = _strip_accents(s)
-        return s.strip().upper()
-
-    target = [norm(p) for p in prestadores_lista]  # inclua "CASSIO CESAR" na chamada
-
-    # Garante coluna Prestador
-    if "Prestador" not in df.columns:
-        df["Prestador"] = pd.NA
+        return _strip_accents(s).upper().strip() if pd.notna(s) else ""
 
     df["Prestador_norm"] = df["Prestador"].apply(norm)
-    df = df[df["Prestador_norm"].isin(target)].copy()
+    df = df[df["Prestador_norm"].isin([norm(p) for p in prestadores_lista])]
 
-    # 4) start_key (ordenação temporal)
-    hora_inicio = df["Hora_Inicio"] if "Hora_Inicio" in df.columns else pd.Series("", index=df.index)
-    data_series = df["Data"] if "Data" in df.columns else pd.Series("", index=df.index)
-    df["start_key"] = pd.to_datetime(
-        data_series.fillna("").astype(str) + " " + hora_inicio.fillna("").astype(str),
-        format="%d/%m/%Y %H:%M",
-        errors="coerce"
-    )
-
-    # 4.1) DEDUP HÍBRIDA com VALORES CRUS (pré-herança) e regra PA/PV
-    def _norm_blank(series: pd.Series) -> pd.Series:
-        return series.fillna("").astype(str).str.strip().str.upper()
-
-    P_raw  = _norm_blank(df["__pac_raw"])
-    A_raw  = _norm_blank(df["__att_raw"])
-    V_raw  = _norm_blank(df["__aviso_raw"])
-    D      = _norm_blank(df["Data"])
-    PR     = df["Prestador_norm"].fillna("").astype(str)
-
-    # Prioriza PA (Paciente+Atendimento), depois PV (Paciente+Aviso), depois P, A, V e T (tempo)
-    df["__dedup_tag"] = np.where((P_raw != "") & (A_raw != ""),
-        "PA|" + D + "|" + P_raw + "|" + A_raw + "|" + PR,
-        np.where((P_raw != "") & (V_raw != ""),
-            "PV|" + D + "|" + P_raw + "|" + V_raw + "|" + PR,
-            np.where(P_raw != "",
-                "P|"  + D + "|" + P_raw + "|" + PR,
-                np.where(A_raw != "",
-                    "A|" + D + "|" + A_raw + "|" + PR,
-                    np.where(V_raw != "",
-                        "V|" + D + "|" + V_raw + "|" + PR,
-                        "T|" + D + "|" + PR + "|" + df["start_key"].astype(str)
-                    )
-                )
-            )
-        )
-    )
-
-    df = df.sort_values(["Data", "Paciente", "Prestador_norm", "start_key"])
-    df = df.drop_duplicates(subset=["__dedup_tag"], keep="first")
-
-    # 🔧 Correção: usar o Paciente CRU (sanitizado) no resultado final (evita heranças indevidas)
-    df["Paciente"] = df["__pac_raw"]
-
-    # Limpeza de colunas técnicas
-    df = df.drop(columns=["__dedup_tag", "__pac_raw", "__att_raw", "__aviso_raw"], errors="ignore")
-
-    # 5) Hospital + Ano/Mes/Dia
-    hosp = selected_hospital if (selected_hospital and not pd.isna(selected_hospital)) else ""
-    hosp = hosp.strip() or "Hospital não informado"
-    df["Hospital"] = hosp
-
-    # Garante coluna Data antes de extrair Ano/Mes/Dia
-    if "Data" not in df.columns:
-        df["Data"] = pd.NA
+    df["Hospital"] = selected_hospital or "Hospital não informado"
 
     dt = pd.to_datetime(df["Data"], format="%d/%m/%Y", errors="coerce")
     df["Ano"] = dt.dt.year
     df["Mes"] = dt.dt.month
     df["Dia"] = dt.dt.day
 
-    # 6) Seleção das colunas finais (organizado por ano/mês/dia)
-    final_cols = [
-        "Hospital", "Ano", "Mes", "Dia",
-        "Data", "Atendimento", "Paciente", "Aviso",
+    out = df[[
+        "Hospital", "Ano", "Mes", "Dia", "Data",
+        "Atendimento", "Paciente", "Aviso",
         "Convenio", "Prestador", "Quarto"
-    ]
-    for c in final_cols:
-        if c not in df.columns:
-            df[c] = pd.NA
+    ]].sort_values(
+        ["Hospital", "Ano", "Mes", "Dia", "Paciente", "Prestador"]
+    ).reset_index(drop=True)
 
-    out = df[final_cols].copy()
-
-    # Ordenação para retorno
-    out = out.sort_values(["Hospital", "Ano", "Mes", "Dia", "Paciente", "Prestador"]).reset_index(drop=True)
     return out
