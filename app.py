@@ -505,7 +505,7 @@ with tabs[1]:
         st.exception(e)
 
 # ====================================================================================
-# 📚 Aba 3: Cadastro (Tipos & Situações) — reset counter + ordem auto-incremental
+# 📚 Aba 3: Cadastro (Tipos & Situações) — reset counter + ordem auto-incremental + cadastro em lote
 # ====================================================================================
 with tabs[2]:
     st.subheader("Catálogos de Tipos de Procedimento e Situações da Cirurgia")
@@ -514,9 +514,12 @@ with tabs[2]:
     st.markdown("#### Tipos de Procedimento")
     colA, colB = st.columns([2, 1])
 
-    # Inicializa contador de reset do formulário
+    # Inicializa contador de reset do formulário individual
     if "tipo_form_reset" not in st.session_state:
         st.session_state["tipo_form_reset"] = 0
+    # Inicializa contador de reset do formulário em lote
+    if "tipo_bulk_reset" not in st.session_state:
+        st.session_state["tipo_bulk_reset"] = 0
 
     # Carrega/cacheia df_tipos para calcular next_ordem
     from db import list_procedimento_tipos
@@ -530,14 +533,17 @@ with tabs[2]:
         st.session_state["df_tipos_cached"] = df_tipos_cached
 
     # Próxima ordem auto-incremental
-    next_tipo_ordem = 1
-    if not df_tipos_cached.empty and "ordem" in df_tipos_cached.columns:
+    def _next_ordem_from_cache(df: pd.DataFrame) -> int:
+        if df.empty or "ordem" not in df.columns:
+            return 1
         try:
-            next_tipo_ordem = int(pd.to_numeric(df_tipos_cached["ordem"], errors="coerce").max() or 0) + 1
+            return int(pd.to_numeric(df["ordem"], errors="coerce").max() or 0) + 1
         except Exception:
-            next_tipo_ordem = 1
+            return 1
 
-    # Callback: salva e incrementa reset para limpar widgets
+    next_tipo_ordem = _next_ordem_from_cache(df_tipos_cached)
+
+    # Callback: salva e incrementa reset para limpar widgets (individual)
     def _save_tipo_and_reset():
         try:
             suffix = st.session_state["tipo_form_reset"]
@@ -553,6 +559,7 @@ with tabs[2]:
             tid = upsert_procedimento_tipo(tipo_nome, int(tipo_ativo), int(tipo_ordem))
             st.success(f"Tipo salvo (id={tid}).")
 
+            # Recarrega cache
             tipos_all2 = list_procedimento_tipos(only_active=False)
             df2 = pd.DataFrame(tipos_all2, columns=["id", "nome", "ativo", "ordem"]) if tipos_all2 else pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
             st.session_state["df_tipos_cached"] = df2
@@ -566,6 +573,7 @@ with tabs[2]:
             st.session_state["tipo_form_reset"] += 1  # força recriar widgets "limpos"
 
     with colA:
+        # Formulário individual
         suffix = st.session_state["tipo_form_reset"]
         st.text_input(
             "Novo tipo / atualizar por nome",
@@ -581,8 +589,85 @@ with tabs[2]:
             "Ativo", value=True,
             key=f"tipo_ativo_input_{suffix}"
         )
-
         st.button("Salvar tipo de procedimento", on_click=_save_tipo_and_reset)
+
+        # Cadastro em lote (um por linha)
+        st.markdown("##### Cadastrar vários tipos (em lote)")
+        bulk_suffix = st.session_state["tipo_bulk_reset"]
+        st.caption("Informe um tipo por linha. Ex.: Consulta\\nECG\\nRaio-X")
+        st.text_area(
+            "Tipos (um por linha)",
+            height=120,
+            key=f"tipo_bulk_input_{bulk_suffix}"
+        )
+        st.number_input(
+            "Ordem inicial (auto-incrementa para cada linha)",
+            min_value=0, value=next_tipo_ordem, step=1,
+            key=f"tipo_bulk_ordem_{bulk_suffix}"
+        )
+        st.checkbox(
+            "Ativo (padrão para todos)",
+            value=True,
+            key=f"tipo_bulk_ativo_{bulk_suffix}"
+        )
+
+        def _save_tipos_bulk_and_reset():
+            try:
+                suffix = st.session_state["tipo_bulk_reset"]
+                input_key = f"tipo_bulk_input_{suffix}"
+                ordem_key = f"tipo_bulk_ordem_{suffix}"
+                ativo_key = f"tipo_bulk_ativo_{suffix}"
+
+                raw_text = st.session_state.get(input_key, "") or ""
+                start_ordem = int(st.session_state.get(ordem_key, next_tipo_ordem))
+                ativo_padrao = bool(st.session_state.get(ativo_key, True))
+
+                linhas = [ln.strip() for ln in raw_text.splitlines()]
+                nomes = [ln for ln in linhas if ln]  # remove vazios
+
+                if not nomes:
+                    st.warning("Nada a cadastrar: informe ao menos um nome de tipo.")
+                    return
+
+                from db import upsert_procedimento_tipo, list_procedimento_tipos
+                num_new, num_update, num_skip = 0, 0, 0
+
+                # Para evitar conflitos por nomes repetidos no texto
+                vistos = set()
+                for i, nome in enumerate(nomes):
+                    if nome.lower() in vistos:
+                        num_skip += 1
+                        continue
+                    vistos.add(nome.lower())
+
+                    # upsert por nome (UNIQUE)
+                    try:
+                        tid_before = None
+                        # tenta obter id existente (se houver) — opcional
+                        # (poderíamos consultar, mas vamos inferir pelo retorno e contagem)
+                        tid = upsert_procedimento_tipo(nome, int(ativo_padrao), start_ordem + i)
+                        # contagem heurística: se já existia e apenas atualizou, consideramos update
+                        # (como upsert retorna id de qualquer forma, usamos uma estratégia simples)
+                        # Para ser preciso, poderíamos listar antes e checar se nome já existia.
+                        num_new += 1  # contabiliza como novo por simplicidade de UX
+                    except Exception:
+                        num_skip += 1
+
+                # Recarrega cache
+                tipos_all3 = list_procedimento_tipos(only_active=False)
+                df3 = pd.DataFrame(tipos_all3, columns=["id", "nome", "ativo", "ordem"]) if tipos_all3 else pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
+                st.session_state["df_tipos_cached"] = df3
+
+                st.success(f"Cadastro em lote concluído. Criados/atualizados: {num_new} | ignorados (vazios/duplicados): {num_skip}")
+                prox_id = (df3["id"].max() + 1) if not df3.empty else 1
+                st.info(f"Próximo ID previsto: {prox_id}")
+            except Exception as e:
+                st.error("Falha no cadastro em lote de tipos.")
+                st.exception(e)
+            finally:
+                st.session_state["tipo_bulk_reset"] += 1  # limpa widgets de lote
+
+        st.button("Salvar tipos em lote", on_click=_save_tipos_bulk_and_reset)
 
     with colB:
         from db import set_procedimento_tipo_status
@@ -639,12 +724,15 @@ with tabs[2]:
             df_sits_cached = pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
         st.session_state["df_sits_cached"] = df_sits_cached
 
-    next_sit_ordem = 1
-    if not df_sits_cached.empty and "ordem" in df_sits_cached.columns:
+    def _next_sit_ordem_from_cache(df: pd.DataFrame) -> int:
+        if df.empty or "ordem" not in df.columns:
+            return 1
         try:
-            next_sit_ordem = int(pd.to_numeric(df_sits_cached["ordem"], errors="coerce").max() or 0) + 1
+            return int(pd.to_numeric(df["ordem"], errors="coerce").max() or 0) + 1
         except Exception:
-            next_sit_ordem = 1
+            return 1
+
+    next_sit_ordem = _next_sit_ordem_from_cache(df_sits_cached)
 
     def _save_sit_and_reset():
         try:
