@@ -1,3 +1,4 @@
+
 # export.py
 import io
 import re
@@ -77,12 +78,15 @@ def to_formatted_excel(
     """
     output = io.BytesIO()
 
-    # Validação de tipo para evitar AttributeError
-    if df is None or not isinstance(df, pd.DataFrame):
-        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            pd.DataFrame({"Aviso": ["Nenhum dado disponível para exportação"]}).to_excel(writer, index=False)
-        output.seek(0)
-        return output
+    # ✅ Validação e coerção de tipo
+    if df is None or not hasattr(df, "columns"):
+        try:
+            df = pd.DataFrame(df)
+        except Exception:
+            with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+                pd.DataFrame({"Aviso": ["Nenhum dado disponível para exportação"]}).to_excel(writer, index=False)
+            output.seek(0)
+            return output
 
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         _write_sheet(writer, _sanitize_sheet_name(sheet_name), df)
@@ -97,12 +101,15 @@ def to_formatted_excel_by_hospital(df: pd.DataFrame) -> io.BytesIO:
     """
     output = io.BytesIO()
 
-    # Validação de tipo para evitar AttributeError
-    if df is None or not isinstance(df, pd.DataFrame):
-        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            pd.DataFrame({"Aviso": ["Nenhum dado disponível para exportação"]}).to_excel(writer, index=False)
-        output.seek(0)
-        return output
+    # ✅ Validação e coerção de tipo (corrige erro de atributo .columns)
+    if df is None or not hasattr(df, "columns"):
+        try:
+            df = pd.DataFrame(df)
+        except Exception:
+            with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+                pd.DataFrame({"Aviso": ["Nenhum dado disponível para exportação"]}).to_excel(writer, index=False)
+            output.seek(0)
+            return output
 
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         if "Hospital" not in df.columns:
@@ -140,12 +147,15 @@ def to_formatted_excel_cirurgias(df: pd.DataFrame) -> io.BytesIO:
     """
     output = io.BytesIO()
 
-    # Validação de tipo para evitar AttributeError
-    if df is None or not isinstance(df, pd.DataFrame):
-        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            pd.DataFrame({"Aviso": ["Nenhum dado disponível para exportação"]}).to_excel(writer, index=False)
-        output.seek(0)
-        return output
+    # ✅ Validação e coerção de tipo
+    if df is None or not hasattr(df, "columns"):
+        try:
+            df = pd.DataFrame(df)
+        except Exception:
+            with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+                pd.DataFrame({"Aviso": ["Nenhum dado disponível para exportação"]}).to_excel(writer, index=False)
+            output.seek(0)
+            return output
 
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         if "Hospital" not in df.columns:
