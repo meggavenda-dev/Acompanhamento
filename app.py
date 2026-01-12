@@ -425,9 +425,9 @@ with tabs[1]:
         st.markdown("#### Lista de Cirurgias (com pacientes carregados da base)")
         st.caption("Edite diretamente no grid. Selecione **Tipo (nome)** e **Situação (nome)**; ao salvar, o app preenche os IDs correspondentes.")
 
-        # 👇 Oculta as colunas numéricas e de auditoria na visão do editor
+        # 👇 Oculta colunas ID/Fonte, numéricas e auditoria na visão do editor
         df_edit_view = df_union.drop(
-            columns=["Procedimento_Tipo_ID", "Situacao_ID", "created_at", "updated_at"],
+            columns=["id", "Fonte", "Procedimento_Tipo_ID", "Situacao_ID", "created_at", "updated_at"],
             errors="ignore"
         )
 
@@ -436,8 +436,6 @@ with tabs[1]:
             use_container_width=True,
             num_rows="fixed",
             column_config={
-                "id": st.column_config.NumberColumn(disabled=True),
-                "Fonte": st.column_config.TextColumn(disabled=True),
                 "Hospital": st.column_config.TextColumn(),
                 "Atendimento": st.column_config.TextColumn(),
                 "Paciente": st.column_config.TextColumn(),
