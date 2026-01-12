@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 import os, math
-from typing import Optional, Sequence, List, Tuple, Dict, Any
+from typing import Dict, Any
 from datetime import datetime
 from sqlalchemy import create_engine, text
 
@@ -46,39 +46,66 @@ def _safe_str(v, default=""):
     return str(v).strip()
 
 # =============================================================================
-# INIT DB
+# INIT DB (com UNIQUE constraints)
 # =============================================================================
 def init_db():
     engine = get_engine()
     with engine.begin() as conn:
+        # Pacientes com UNIQUE para permitir UPSERT
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS pacientes_unicos_por_dia_prestador (
-            Hospital TEXT, Ano INTEGER, Mes INTEGER, Dia INTEGER,
-            Data TEXT, Atendimento TEXT, Paciente TEXT, Aviso TEXT,
-            Convenio TEXT, Prestador TEXT, Quarto TEXT
+            Hospital TEXT,
+            Ano INTEGER,
+            Mes INTEGER,
+            Dia INTEGER,
+            Data TEXT,
+            Atendimento TEXT,
+            Paciente TEXT,
+            Aviso TEXT,
+            Convenio TEXT,
+            Prestador TEXT,
+            Quarto TEXT,
+            UNIQUE(Hospital, Atendimento, Paciente, Prestador, Data)
         );
         """))
+
+        # Cirurgias com UNIQUE para permitir ON CONFLICT
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS cirurgias (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            Hospital TEXT, Atendimento TEXT, Paciente TEXT,
-            Prestador TEXT, Data_Cirurgia TEXT,
-            Convenio TEXT, Procedimento_Tipo_ID INTEGER, Situacao_ID INTEGER,
-            Guia_AMHPTISS TEXT, Guia_AMHPTISS_Complemento TEXT,
-            Fatura TEXT, Observacoes TEXT,
-            created_at TEXT, updated_at TEXT
+            Hospital TEXT,
+            Atendimento TEXT,
+            Paciente TEXT,
+            Prestador TEXT,
+            Data_Cirurgia TEXT,
+            Convenio TEXT,
+            Procedimento_Tipo_ID INTEGER,
+            Situacao_ID INTEGER,
+            Guia_AMHPTISS TEXT,
+            Guia_AMHPTISS_Complemento TEXT,
+            Fatura TEXT,
+            Observacoes TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            UNIQUE(Hospital, Atendimento, Paciente, Prestador, Data_Cirurgia)
         );
         """))
+
+        # Catálogos
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS procedimento_tipos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nome TEXT UNIQUE, ativo INTEGER, ordem INTEGER
+            nome TEXT UNIQUE,
+            ativo INTEGER,
+            ordem INTEGER
         );
         """))
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS cirurgia_situacoes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nome TEXT UNIQUE, ativo INTEGER, ordem INTEGER
+            nome TEXT UNIQUE,
+            ativo INTEGER,
+            ordem INTEGER
         );
         """))
 
@@ -92,7 +119,8 @@ def vacuum():
 
 def reset_db_file():
     dispose_engine()
-    if os.path.exists(DB_PATH): os.remove(DB_PATH)
+    if os.path.exists(DB_PATH):
+        os.remove(DB_PATH)
     init_db()
 
 def delete_all_pacientes() -> int:
@@ -129,10 +157,15 @@ def upsert_dataframe(df):
     with engine.begin() as conn:
         for _, r in df.iterrows():
             conn.execute(text("""
-                INSERT OR REPLACE INTO pacientes_unicos_por_dia_prestador
+                INSERT INTO pacientes_unicos_por_dia_prestador
                 (Hospital, Ano, Mes, Dia, Data, Atendimento, Paciente, Aviso, Convenio, Prestador, Quarto)
                 VALUES
                 (:Hospital, :Ano, :Mes, :Dia, :Data, :Atendimento, :Paciente, :Aviso, :Convenio, :Prestador, :Quarto)
+                ON CONFLICT(Hospital, Atendimento, Paciente, Prestador, Data)
+                DO UPDATE SET
+                    Aviso=excluded.Aviso,
+                    Convenio=excluded.Convenio,
+                    Quarto=excluded.Quarto
             """), {
                 "Hospital": _safe_str(r.get("Hospital")),
                 "Ano": _safe_int(r.get("Ano")),
@@ -316,3 +349,4 @@ def list_registros_base_all(limit=500):
             FROM pacientes_unicos_por_dia_prestador
             ORDER BY Data DESC LIMIT {int(limit)}
         """)).fetchall()
+
