@@ -2,14 +2,14 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 import os, math, tempfile
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional, Sequence, Tuple
 from datetime import datetime
 from sqlalchemy import create_engine, text
 
 # =============================================================================
 # CONFIGURAÇÃO DO BANCO
 # =============================================================================
-# Usa diretório temporário para evitar problemas de permissão
+# Usa diretório temporário para evitar problemas de permissão (read-only)
 DATA_DIR = tempfile.gettempdir()
 DB_PATH = os.path.join(DATA_DIR, "exemplo.db")
 DB_URI = f"sqlite:///{DB_PATH}"
@@ -35,20 +35,22 @@ def _safe_int(v, default=0):
         if v is None: return default
         if isinstance(v, float) and math.isnan(v): return default
         return int(float(str(v).strip()))
-    except: return default
+    except: 
+        return default
 
 def _safe_str(v, default=""):
     if v is None: return default
     try:
         if isinstance(v, float) and math.isnan(v): return default
-    except: pass
+    except:
+        pass
     return str(v).strip()
 
 # =============================================================================
 # GARANTIA DE ÍNDICES ÚNICOS
 # =============================================================================
 def ensure_unique_indexes():
-    """Cria índices únicos idempotentes para garantir ON CONFLICT funcionando."""
+    """Cria índices únicos idempotentes (garante ON CONFLICT funcionando)."""
     engine = get_engine()
     with engine.begin() as conn:
         conn.execute(text("""
@@ -158,13 +160,18 @@ def delete_all_cirurgias() -> int:
     return total
 
 # =============================================================================
-# PACIENTES
+# PACIENTES (UPSERT / LEITURAS)
 # =============================================================================
 def upsert_dataframe(df):
-    if df is None or df.empty: return
+    """
+    Salva DataFrame na tabela base (pacientes_unicos_por_dia_prestador).
+    Usa ON CONFLICT p/ atualizar Aviso, Convenio, Quarto.
+    """
+    if df is None or df.empty: 
+        return
     if (df["Paciente"].astype(str).str.strip() == "").any():
         raise ValueError("Existem pacientes vazios — corrija antes de salvar.")
-    ensure_unique_indexes()  # garante índices antes do upsert
+    ensure_unique_indexes()
     engine = get_engine()
     with engine.begin() as conn:
         for _, r in df.iterrows():
@@ -208,12 +215,91 @@ def count_all():
         return conn.execute(text("SELECT COUNT(*) FROM pacientes_unicos_por_dia_prestador")).scalar_one()
 
 # =============================================================================
-# CATÁLOGOS
+# LEITURAS P/ ABA CIRURGIAS (BASE)
+# =============================================================================
+def _date_filter_clause(colname: str, ano: Optional[int], mes: Optional[int]) -> Tuple[str, dict]:
+    """
+    Monta filtro por ano/mês tolerante a 'dd/MM/yyyy' ou 'YYYY-MM-DD'.
+    """
+    params = {}
+    parts = []
+    if ano is not None and mes is not None:
+        # 'dd/MM/yyyy' termina com '/YYYY' e contém '/MM/'
+        parts.append(f"(({colname} LIKE :p1) OR ({colname} LIKE :p2))")
+        params["p1"] = f"%/{mes:02d}/{ano}"
+        params["p2"] = f"{ano}-{mes:02d}-%"
+    elif ano is not None:
+        parts.append(f"(({colname} LIKE :p3) OR ({colname} LIKE :p4))")
+        params["p3"] = f"%/{ano}"
+        params["p4"] = f"{ano}-%"
+    clause = (" AND " + " AND ".join(parts)) if parts else ""
+    return clause, params
+
+def find_registros_para_prefill(hospital: str,
+                                ano: Optional[int] = None,
+                                mes: Optional[int] = None,
+                                prestadores: Optional[Sequence[str]] = None) -> list:
+    """
+    Retorna registros da tabela base (pacientes_unicos_por_dia_prestador) para pré-preencher a Aba Cirurgias.
+    Filtros opcionais: hospital (obrigatório), ano/mês, lista de prestadores.
+    """
+    if not hospital:
+        return []
+
+    where = ["Hospital = :h"]
+    params = {"h": hospital}
+
+    # Data (aceita 'dd/MM/yyyy' e 'YYYY-MM-DD')
+    clause, p = _date_filter_clause("Data", ano, mes)
+    if clause:
+        where.append(clause[5:] if clause.startswith(" AND ") else clause)
+        params.update(p)
+
+    # Prestadores (case-sensitive no SQLite; normalize se quiser)
+    if prestadores:
+        tokens = [str(p).strip() for p in prestadores if str(p).strip()]
+        if tokens:
+            in_params = {}
+            placeholders = []
+            for i, val in enumerate(tokens):
+                key = f"pp{i}"
+                in_params[key] = val
+                placeholders.append(f":{key}")
+            where.append(f"Prestador IN ({', '.join(placeholders)})")
+            params.update(in_params)
+
+    sql = f"""
+        SELECT Hospital, Data, Atendimento, Paciente, Convenio, Prestador
+        FROM pacientes_unicos_por_dia_prestador
+        WHERE {' AND '.join(where)}
+        ORDER BY Data, Prestador, Atendimento, Paciente
+    """
+    engine = get_engine()
+    with engine.connect() as conn:
+        return conn.execute(text(sql), params).fetchall()
+
+def list_registros_base_all(limit: int = 500) -> list:
+    """
+    Lista registros da base para diagnóstico rápido (limite configurável).
+    """
+    limit = int(limit or 500)
+    engine = get_engine()
+    with engine.connect() as conn:
+        return conn.execute(text(f"""
+            SELECT Hospital, Data, Atendimento, Paciente, Convenio, Prestador
+            FROM pacientes_unicos_por_dia_prestador
+            ORDER BY Data DESC, Prestador, Atendimento, Paciente
+            LIMIT {limit}
+        """)).fetchall()
+
+# =============================================================================
+# CATÁLOGOS (Tipos e Situações)
 # =============================================================================
 def list_procedimento_tipos(only_active=True):
     engine = get_engine()
     sql = "SELECT id, nome, ativo, ordem FROM procedimento_tipos"
-    if only_active: sql += " WHERE ativo=1"
+    if only_active: 
+        sql += " WHERE ativo=1"
     sql += " ORDER BY ordem, nome"
     with engine.connect() as conn:
         return conn.execute(text(sql)).fetchall()
@@ -238,7 +324,8 @@ def set_procedimento_tipo_status(tid, ativo):
 def list_cirurgia_situacoes(only_active=True):
     engine = get_engine()
     sql = "SELECT id, nome, ativo, ordem FROM cirurgia_situacoes"
-    if only_active: sql += " WHERE ativo=1"
+    if only_active: 
+        sql += " WHERE ativo=1"
     sql += " ORDER BY ordem, nome"
     with engine.connect() as conn:
         return conn.execute(text(sql)).fetchall()
@@ -261,9 +348,14 @@ def set_cirurgia_situacao_status(sid, ativo):
         conn.execute(text("UPDATE cirurgia_situacoes SET ativo=:a WHERE id=:i"), {"a": int(ativo), "i": int(sid)})
 
 # =============================================================================
-# CIRURGIAS
+# CIRURGIAS (UPSERT / LISTA / DELETE)
 # =============================================================================
 def insert_or_update_cirurgia(payload: Dict[str, Any]) -> int:
+    """
+    UPSERT de cirurgia. A chave é:
+    (Hospital, Atendimento, Paciente, Prestador, Data_Cirurgia)
+    Observação: Aceita Atendimento vazio se Paciente vier preenchido (e vice-versa).
+    """
     ensure_unique_indexes()
     h = _safe_str(payload.get("Hospital"))
     att = _safe_str(payload.get("Atendimento"), "")
@@ -335,4 +427,3 @@ def delete_cirurgia(cirurgia_id: int):
     engine = get_engine()
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM cirurgias WHERE id=:i"), {"i": int(cirurgia_id)})
-
