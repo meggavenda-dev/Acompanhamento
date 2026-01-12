@@ -1,6 +1,5 @@
 
 # -*- coding: utf-8 -*-
-# app.py
 import os
 from datetime import datetime
 import streamlit as st
@@ -109,40 +108,38 @@ with st.sidebar:
         if st.button("Apagar **PACIENTES** (tabela base)", type="secondary", disabled=not can_execute):
             try:
                 from db import delete_all_pacientes, vacuum
-                delete_all_pacientes()
+                apagados = delete_all_pacientes()
                 vacuum()
-                st.success("Pacientes apagados (tabela base).")
-                _sync_after_reset("Reset: apaga pacientes (tabela base)")
+                st.success(f"✅ {apagados} paciente(s) apagado(s) do banco.")
+                _sync_after_reset(f"Reset: apaga {apagados} pacientes")
                 st.rerun()
             except Exception as e:
                 st.error("Falha ao apagar pacientes.")
                 st.exception(e)
 
-
     with col_r2:
         if st.button("Apagar **CIRURGIAS**", type="secondary", disabled=not can_execute):
             try:
-            from db import delete_all_cirurgias, vacuum
-            apagadas = delete_all_cirurgias()  # retorna quantas foram removidas
-            vacuum()
-            st.session_state.pop("editor_lista_cirurgias_union", None)  # limpa cache do grid
-            st.success(f"✅ {apagadas} cirurgia(s) apagada(s) do banco.")
-            _sync_after_reset(f"Reset: apaga {apagadas} cirurgias")
-            st.rerun()
-        except Exception as e:
-            st.error("Falha ao apagar cirurgias.")
-            st.exception(e)
-
+                from db import delete_all_cirurgias, vacuum
+                apagadas = delete_all_cirurgias()  # retorna quantas foram removidas
+                vacuum()
+                st.session_state.pop("editor_lista_cirurgias_union", None)  # limpa cache do grid
+                st.success(f"✅ {apagadas} cirurgia(s) apagada(s) do banco.")
+                _sync_after_reset(f"Reset: apaga {apagadas} cirurgias")
+                st.rerun()
+            except Exception as e:
+                st.error("Falha ao apagar cirurgias.")
+                st.exception(e)
 
     col_r3, col_r4 = st.columns(2)
     with col_r3:
         if st.button("Apagar **CATÁLOGOS** (Tipos/Situações)", type="secondary", disabled=not can_execute):
             try:
                 from db import delete_all_catalogos, vacuum
-                delete_all_catalogos()
+                apagados = delete_all_catalogos()
                 vacuum()
-                st.success("Catálogos apagados (Tipos/Situações).")
-                _sync_after_reset("Reset: apaga catálogos (tipos/situações)")
+                st.success(f"✅ {apagados} registro(s) apagado(s) dos catálogos.")
+                _sync_after_reset(f"Reset: apaga {apagados} catálogos")
                 st.rerun()
             except Exception as e:
                 st.error("Falha ao apagar catálogos.")
@@ -178,6 +175,7 @@ tabs = st.tabs([
     "📚 Cadastro (Tipos & Situações)",
     "📄 Tipos (Lista)"
 ])
+
 
 # ====================================================================================
 # 📥 Aba 1: Importação & Pacientes
