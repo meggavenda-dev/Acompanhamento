@@ -29,23 +29,50 @@ st.set_page_config(page_title="Gestão de Pacientes e Cirurgias", layout="wide")
 st.title("Gestão de Pacientes e Cirurgias")
 st.caption("Download automático do banco no GitHub → Importação/Processamento → Revisão/Salvar → Exportar → Cirurgias → Catálogos")
 
-# 1) Baixa o DB do GitHub (se existir) antes de inicializar tabelas
+# >>> ALTERAÇÃO: baixar o DB do GitHub APENAS uma vez por sessão ou se não existir localmente
 if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
-    try:
-        downloaded = download_db_from_github(
-            owner=GH_OWNER,
-            repo=GH_REPO,
-            path_in_repo=GH_PATH_IN_REPO,
-            branch=GH_BRANCH,
-            local_db_path=DB_PATH
-        )
-        if downloaded:
-            st.success("Banco baixado do GitHub.")
-        else:
-            st.info("Banco não encontrado no GitHub (primeiro uso). Será criado localmente ao salvar.")
-    except Exception as e:
-        st.warning("Não foi possível baixar o banco do GitHub. Verifique token/permissões em st.secrets.")
-        st.exception(e)
+    if ("gh_db_fetched" not in st.session_state) or (not st.session_state["gh_db_fetched"]):
+        if not os.path.exists(DB_PATH):
+            try:
+                downloaded = download_db_from_github(
+                    owner=GH_OWNER,
+                    repo=GH_REPO,
+                    path_in_repo=GH_PATH_IN_REPO,
+                    branch=GH_BRANCH,
+                    local_db_path=DB_PATH
+                )
+                if downloaded:
+                    st.success("Banco baixado do GitHub (primeira carga na sessão).")
+                else:
+                    st.info("Banco não encontrado no GitHub (primeiro uso). Será criado localmente ao salvar.")
+            except Exception as e:
+                st.warning("Não foi possível baixar o banco do GitHub. Verifique token/permissões em st.secrets.")
+                st.exception(e)
+        # marca que já tentou baixar nesta sessão (evita overwrite em cada rerun)
+        st.session_state["gh_db_fetched"] = True
+
+# >>> ALTERAÇÃO: botão opcional na barra lateral para forçar um re-download manual (quando necessário)
+with st.sidebar:
+    st.markdown("### Sincronização GitHub")
+    if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
+        if st.button("🔽 Baixar banco do GitHub (manual)"):
+            try:
+                downloaded = download_db_from_github(
+                    owner=GH_OWNER,
+                    repo=GH_REPO,
+                    path_in_repo=GH_PATH_IN_REPO,
+                    branch=GH_BRANCH,
+                    local_db_path=DB_PATH
+                )
+                if downloaded:
+                    st.success("Banco baixado do GitHub (manual).")
+                else:
+                    st.info("Arquivo não existe no repositório. Salve algo para criar o banco.")
+            except Exception as e:
+                st.error("Falha ao baixar do GitHub.")
+                st.exception(e)
+    else:
+        st.info("GitHub sync desativado (sem token).")
 
 # Inicializa DB
 init_db()
@@ -548,6 +575,24 @@ with tabs[2]:
 
     next_tipo_ordem = _next_ordem_from_cache(df_tipos_cached)
 
+    # >>> ALTERAÇÃO: função utilitária para subir DB ao GitHub após salvar catálogos
+    def _upload_db_catalogo(commit_msg: str):
+        if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
+            try:
+                ok = upload_db_to_github(
+                    owner=GH_OWNER,
+                    repo=GH_REPO,
+                    path_in_repo=GH_PATH_IN_REPO,
+                    branch=GH_BRANCH,
+                    local_db_path=DB_PATH,
+                    commit_message=commit_msg
+                )
+                if ok:
+                    st.success("Sincronização automática com GitHub concluída.")
+            except Exception as e:
+                st.error("Falha ao sincronizar com GitHub (commit automático).")
+                st.exception(e)
+
     # Callback: salva e incrementa reset para limpar widgets (individual)
     def _save_tipo_and_reset():
         try:
@@ -556,7 +601,11 @@ with tabs[2]:
             ordem_key = f"tipo_ordem_input_{suffix}"
             ativo_key = f"tipo_ativo_input_{suffix}"
 
-            tipo_nome = st.session_state.get(nome_key, "").strip()
+            tipo_nome = (st.session_state.get(nome_key) or "").strip()
+            if not tipo_nome:
+                st.warning("Informe um nome de Tipo antes de salvar.")
+                return
+
             tipo_ordem = int(st.session_state.get(ordem_key, next_tipo_ordem))
             tipo_ativo = bool(st.session_state.get(ativo_key, True))
 
@@ -571,6 +620,9 @@ with tabs[2]:
 
             prox_id = (df2["id"].max() + 1) if not df2.empty else 1
             st.info(f"Próximo ID previsto: {prox_id}")
+
+            # >>> ALTERAÇÃO: sobe DB para GitHub após salvar tipo
+            _upload_db_catalogo("Atualiza catálogo de Tipos (salvar individual)")
         except Exception as e:
             st.error("Falha ao salvar tipo.")
             st.exception(e)
@@ -627,16 +679,15 @@ with tabs[2]:
                 start_ordem = int(st.session_state.get(ordem_key, next_tipo_ordem))
                 ativo_padrao = bool(st.session_state.get(ativo_key, True))
 
+                # nomes únicos, não vazios
                 linhas = [ln.strip() for ln in raw_text.splitlines()]
-                nomes = [ln for ln in linhas if ln]  # remove vazios
-
+                nomes = [ln for ln in linhas if ln]
                 if not nomes:
                     st.warning("Nada a cadastrar: informe ao menos um nome de tipo.")
                     return
 
                 from db import upsert_procedimento_tipo, list_procedimento_tipos
                 num_new, num_skip = 0, 0
-
                 vistos = set()
                 for i, nome in enumerate(nomes):
                     if nome.lower() in vistos:
@@ -656,6 +707,9 @@ with tabs[2]:
                 st.success(f"Cadastro em lote concluído. Criados/atualizados: {num_new} | ignorados (vazios/duplicados): {num_skip}")
                 prox_id = (df3["id"].max() + 1) if not df3.empty else 1
                 st.info(f"Próximo ID previsto: {prox_id}")
+
+                # >>> ALTERAÇÃO: sobe DB para GitHub após salvar tipos em lote
+                _upload_db_catalogo("Atualiza catálogo de Tipos (cadastro em lote)")
             except Exception as e:
                 st.error("Falha no cadastro em lote de tipos.")
                 st.exception(e)
@@ -692,6 +746,9 @@ with tabs[2]:
 
                         prox_id = (df3["id"].max() + 1) if not df3.empty else 1
                         st.info(f"Próximo ID previsto: {prox_id}")
+
+                        # >>> ALTERAÇÃO: sobe DB para GitHub após aplicar alterações de status
+                        _upload_db_catalogo("Atualiza catálogo de Tipos (aplicar alterações)")
                     except Exception as e:
                         st.error("Falha ao aplicar alterações nos tipos.")
                         st.exception(e)
@@ -729,6 +786,23 @@ with tabs[2]:
 
     next_sit_ordem = _next_sit_ordem_from_cache(df_sits_cached)
 
+    def _upload_db_situacao(commit_msg: str):
+        if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
+            try:
+                ok = upload_db_to_github(
+                    owner=GH_OWNER,
+                    repo=GH_REPO,
+                    path_in_repo=GH_PATH_IN_REPO,
+                    branch=GH_BRANCH,
+                    local_db_path=DB_PATH,
+                    commit_message=commit_msg
+                )
+                if ok:
+                    st.success("Sincronização automática com GitHub concluída.")
+            except Exception as e:
+                st.error("Falha ao sincronizar com GitHub (commit automático).")
+                st.exception(e)
+
     def _save_sit_and_reset():
         try:
             suffix = st.session_state["sit_form_reset"]
@@ -736,7 +810,11 @@ with tabs[2]:
             ordem_key = f"sit_ordem_input_{suffix}"
             ativo_key = f"sit_ativo_input_{suffix}"
 
-            sit_nome = st.session_state.get(nome_key, "").strip()
+            sit_nome = (st.session_state.get(nome_key) or "").strip()
+            if not sit_nome:
+                st.warning("Informe um nome de Situação antes de salvar.")
+                return
+
             sit_ordem = int(st.session_state.get(ordem_key, next_sit_ordem))
             sit_ativo = bool(st.session_state.get(ativo_key, True))
 
@@ -750,6 +828,8 @@ with tabs[2]:
 
             prox_id_s = (df2["id"].max() + 1) if not df2.empty else 1
             st.info(f"Próximo ID previsto: {prox_id_s}")
+
+            _upload_db_situacao("Atualiza catálogo de Situações (salvar individual)")
         except Exception as e:
             st.error("Falha ao salvar situação.")
             st.exception(e)
@@ -803,6 +883,8 @@ with tabs[2]:
 
                         prox_id_s = (df3["id"].max() + 1) if not df3.empty else 1
                         st.info(f"Próximo ID previsto: {prox_id_s}")
+
+                        _upload_db_situacao("Atualiza catálogo de Situações (aplicar alterações)")
                     except Exception as e:
                         st.error("Falha ao aplicar alterações nas situações.")
                         st.exception(e)
