@@ -8,7 +8,7 @@ import pandas as pd
 from db import (
     init_db, upsert_dataframe, read_all, DB_PATH, count_all,
     delete_all_pacientes, delete_all_cirurgias, delete_all_catalogos,
-    hard_reset_local_db, ensure_db_writable, vacuum,  # vacuum usado via wrapper
+    hard_reset_local_db, ensure_db_writable, vacuum,
     find_registros_para_prefill,
     insert_or_update_cirurgia,
     list_procedimento_tipos,
@@ -36,7 +36,7 @@ except Exception:
 GH_OWNER = st.secrets.get("GH_OWNER", "seu-usuario-ou-org")
 GH_REPO  = st.secrets.get("GH_REPO", "seu-repo")
 GH_BRANCH = st.secrets.get("GH_BRANCH", "main")
-# ✅ alinhar com caminho local (./data/exemplo.db)
+# ✅ alinhar com caminho local (ex.: ./data/exemplo.db)
 GH_PATH_IN_REPO = st.secrets.get("GH_DB_PATH", "data/exemplo.db")
 GITHUB_TOKEN_OK = bool(st.secrets.get("GITHUB_TOKEN", ""))
 
@@ -44,7 +44,7 @@ st.set_page_config(page_title="Gestão de Pacientes e Cirurgias", layout="wide")
 
 # --- Header ---
 st.title("Gestão de Pacientes e Cirurgias")
-st.caption("Download do banco no GitHub (opcional) → Importar/Processar → Revisar/Salvar → Exportar → Cirurgias (com catálogos) → Cadastro/Lista")
+st.caption("Download do banco no GitHub (opcional) → Importar/Processar → Revisar/Salvar (apenas selecionados) → Exportar → Cirurgias → Cadastro/Lista")
 
 # ---------------------------
 # Helper: VACUUM seguro
@@ -263,11 +263,11 @@ tabs = st.tabs([
 ])
 
 # ====================================================================================
-# 📥 Aba 1: Importação & Pacientes
+# 📥 Aba 1: Importação & Pacientes  — COM SELEÇÃO (Opção 3)
 # ====================================================================================
 with tabs[0]:
     st.subheader("Pacientes únicos por data, prestador e hospital")
-    st.caption("Upload → herança/filtragem/deduplicação → Hospital → editar Paciente → salvar → exportar → commit automático no GitHub")
+    st.caption("Upload → herança/filtragem/deduplicação → Hospital → editar Paciente → selecionar → salvar apenas selecionados → exportar → sync GitHub")
 
     st.markdown("#### Prestadores alvo")
     prestadores_default = ["JOSE.ADORNO", "CASSIO CESAR", "FERNANDO AND", "SIMAO.MATOS"]
@@ -294,6 +294,10 @@ with tabs[0]:
         help="Aceita CSV 'bruto' ou planilhas estruturadas."
     )
 
+    # Estado para seleção padrão (Opção 3)
+    if "pacientes_select_default" not in st.session_state:
+        st.session_state["pacientes_select_default"] = True  # default: todos selecionados
+
     if "df_final" not in st.session_state:
         st.session_state.df_final = None
     if "last_upload_id" not in st.session_state:
@@ -306,13 +310,25 @@ with tabs[0]:
         size = getattr(file, "size", 0)
         return f"{name}-{size}-{hospital.strip()}"
 
-    col_reset1, _ = st.columns(2)
+    col_reset1, col_reset2 = st.columns(2)
     with col_reset1:
         if st.button("🧹 Limpar tabela / reset"):
             st.session_state.df_final = None
             st.session_state.last_upload_id = None
             st.session_state.editor_key = "editor_pacientes_reset"
             st.success("Tabela limpa. Faça novo upload para reprocessar.")
+    with col_reset2:
+        col_sel_all, col_sel_none = st.columns(2)
+        with col_sel_all:
+            if st.button("✅ Selecionar todos"):
+                st.session_state["pacientes_select_default"] = True
+                st.success("Todos marcados para importar.")
+                st.rerun()
+        with col_sel_none:
+            if st.button("❌ Desmarcar todos"):
+                st.session_state["pacientes_select_default"] = False
+                st.info("Todos desmarcados; escolha manualmente quem importar.")
+                st.rerun()
 
     if uploaded_file is not None:
         current_upload_id = _make_upload_id(uploaded_file, selected_hospital)
@@ -336,16 +352,25 @@ with tabs[0]:
     if st.session_state.df_final is not None and len(st.session_state.df_final) > 0:
         st.success(f"Processamento concluído! Linhas: {len(st.session_state.df_final)}")
 
-        st.markdown("#### Revisar e editar nomes de Paciente (opcional)")
+        st.markdown("#### Revisar, editar e selecionar pacientes")
         df_to_edit = st.session_state.df_final.sort_values(
             ["Hospital", "Ano", "Mes", "Dia", "Paciente", "Prestador"]
         ).reset_index(drop=True)
+
+        # ➕ Coluna de seleção (Opção 3)
+        default_select = bool(st.session_state.get("pacientes_select_default", True))
+        if "Selecionar" not in df_to_edit.columns:
+            df_to_edit["Selecionar"] = default_select
+        else:
+            # Se o usuário limpou tabela e reprocessou, reorienta para o default atual
+            df_to_edit["Selecionar"] = df_to_edit["Selecionar"].fillna(default_select).astype(bool)
 
         edited_df = st.data_editor(
             df_to_edit,
             use_container_width=True,
             num_rows="fixed",
             column_config={
+                "Selecionar": st.column_config.CheckboxColumn(help="Marque para importar"),
                 "Hospital": st.column_config.TextColumn(disabled=True),
                 "Ano": st.column_config.NumberColumn(disabled=True),
                 "Mes": st.column_config.NumberColumn(disabled=True),
@@ -361,41 +386,45 @@ with tabs[0]:
             hide_index=True,
             key=st.session_state.editor_key
         )
-        # ✅ Garantir tipo correto após o editor
         edited_df = pd.DataFrame(edited_df)
-        st.session_state.df_final = edited_df
 
-        st.markdown("#### Persistência")
-        if st.button("Salvar no banco (exemplo.db)"):
+        # 🔽 Filtra apenas os selecionados
+        df_selecionados = edited_df[edited_df["Selecionar"] == True].copy()
+
+        st.markdown("#### Persistência (apenas selecionados)")
+        if st.button("💾 Salvar apenas selecionados no banco"):
             try:
-                ensure_db_writable()
-                upsert_dataframe(st.session_state.df_final)
-                total = count_all()
-                st.success(f"Dados salvos com sucesso. Total de linhas no banco: {total}")
+                if df_selecionados.empty:
+                    st.warning("Nenhum paciente selecionado para importação.")
+                else:
+                    ensure_db_writable()
+                    salvos, ignoradas = upsert_dataframe(df_selecionados)
+                    total = count_all()
+                    st.success(f"Importação concluída: {salvos} salvos, {ignoradas} ignorados (chave incompleta). Total no banco: {total}")
 
-                # 🔁 Sincroniza com GitHub com merge automático em caso de conflito + detalhes
-                if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
-                    try:
-                        ok, status, msg = safe_upload_with_merge(
-                            owner=GH_OWNER,
-                            repo=GH_REPO,
-                            path_in_repo=GH_PATH_IN_REPO,
-                            branch=GH_BRANCH,
-                            local_db_path=DB_PATH,
-                            commit_message="Atualiza banco SQLite via app (salvar pacientes)",
-                            prev_sha=st.session_state.get("gh_sha"),
-                            _return_details=True
-                        )
-                        if ok:
-                            st.success("Sincronização automática com GitHub concluída.")
-                        else:
-                            st.error(f"Falha ao sincronizar com GitHub (status={status}). {msg}")
-                    except Exception as e:
-                        st.error("Falha ao sincronizar com GitHub.")
-                        st.exception(e)
+                    # 🔁 Sincroniza com GitHub com merge automático em caso de conflito + detalhes
+                    if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
+                        try:
+                            ok, status, msg = safe_upload_with_merge(
+                                owner=GH_OWNER,
+                                repo=GH_REPO,
+                                path_in_repo=GH_PATH_IN_REPO,
+                                branch=GH_BRANCH,
+                                local_db_path=DB_PATH,
+                                commit_message=f"Atualiza banco SQLite via app (salvar pacientes selecionados: {salvos})",
+                                prev_sha=st.session_state.get("gh_sha"),
+                                _return_details=True
+                            )
+                            if ok:
+                                st.success("Sincronização automática com GitHub concluída.")
+                            else:
+                                st.error(f"Falha ao sincronizar com GitHub (status={status}). {msg}")
+                        except Exception as e:
+                            st.error("Falha ao sincronizar com GitHub.")
+                            st.exception(e)
 
-                st.session_state.df_final = None
-                st.session_state.editor_key = "editor_pacientes_after_save"
+                    # após salvar, mantém tabela para nova seleção/edição (não limpa)
+                    st.session_state.editor_key = "editor_pacientes_after_save"
 
             except PermissionError as pe:
                 st.error(f"Diretório/arquivo do DB não é gravável. Ajuste 'DB_DIR' ou permissões. Detalhe: {pe}")
@@ -404,7 +433,8 @@ with tabs[0]:
                 st.exception(e)
 
         st.markdown("#### Exportar Excel (multi-aba por Hospital)")
-        df_for_export = pd.DataFrame(st.session_state.df_final)
+        # Exporta o DF atual (inclui não selecionados, pois é revisão/diagnóstico)
+        df_for_export = pd.DataFrame(edited_df.drop(columns=["Selecionar"], errors="ignore"))
         excel_bytes = to_formatted_excel_by_hospital(df_for_export)
         st.download_button(
             label="Baixar Excel por Hospital (arquivo atual)",
@@ -432,7 +462,7 @@ with tabs[0]:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
     else:
-        st.info("Banco ainda sem dados. Faça o upload e clique em 'Salvar no banco'.")
+        st.info("Banco ainda sem dados. Faça o upload, selecione e clique em 'Salvar apenas selecionados no banco'.")
 
 # ====================================================================================
 # 🩺 Aba 2: Cirurgias
@@ -474,7 +504,6 @@ with tabs[1]:
         if st.button("🔄 Recarregar catálogos (Tipos/Situações)"):
             st.session_state["catalog_refresh_ts"] = datetime.now().isoformat(timespec="seconds")
             st.success(f"Catálogos recarregados às {st.session_state['catalog_refresh_ts']}")
-
     with col_refresh_info:
         ts = st.session_state.get("catalog_refresh_ts")
         if ts:
@@ -565,8 +594,8 @@ with tabs[1]:
             "Prestador": df_base["Prestador"],
             "Data_Cirurgia": df_base["Data"],
             "Convenio": df_base["Convenio"],
-            "Procedimento_Tipo_ID": [None]*len(df_base),
-            "Situacao_ID": [None]*len(df_base),
+            "Procedimento_Tipo_ID": [None]*len(df_base),  # será preenchido ao salvar
+            "Situacao_ID": [None]*len(df_base),           # idem
             "Guia_AMHPTISS": ["" for _ in range(len(df_base))],
             "Guia_AMHPTISS_Complemento": ["" for _ in range(len(df_base))],
             "Fatura": ["" for _ in range(len(df_base))],
@@ -574,8 +603,8 @@ with tabs[1]:
             "created_at": [None]*len(df_base),
             "updated_at": [None]*len(df_base),
             "Fonte": ["Base"]*len(df_base),
-            "Tipo (nome)": ["" for _ in range(len(df_base))],
-            "Situação (nome)": ["" for _ in range(len(df_base))],
+            "Tipo (nome)": ["" for _ in range(len(df_base))],  # edição por nome
+            "Situação (nome)": ["" for _ in range(len(df_base))],  # edição por nome
         })
 
         # União preferindo registros já existentes (evita duplicar mesma chave)
@@ -591,7 +620,7 @@ with tabs[1]:
         df_union.drop(columns=["_has_id", "_AttOrPac"], inplace=True)
 
         st.markdown("#### Lista de Cirurgias (com pacientes carregados da base)")
-        st.caption("Edite diretamente no grid. Selecione **Tipo (nome)** e **Situação (nome)**; ao salvar, o app preenche os IDs correspondentes.")
+        st.caption("Edite diretamente no grid. Selecione **Tipo (nome)** e **Situação (nome)**; ao salvar, IDs são resolvidos automaticamente.")
 
         # visão editável
         df_edit_view = df_union.drop(
