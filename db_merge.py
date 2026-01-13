@@ -30,10 +30,6 @@ Tabelas e regras:
 Uso:
     merge_sqlite_dbs(local_path, remote_path, output_path)
 
-Observações:
-- Este módulo não altera o banco local nem o remoto diretamente; ele gera um novo banco "mesclado".
-- Após o merge, o chamador normalmente substitui o banco local pelo 'output_path'.
-
 Requer:
 - sqlalchemy
 """
@@ -52,14 +48,6 @@ def merge_sqlite_dbs(local_path: str, remote_path: str, output_path: str) -> Non
     1) Copia o REMOTO para 'output_path' (o remoto é a base).
     2) ATTACH DATABASE do LOCAL como 'localdb'.
     3) Executa INSERT ... ON CONFLICT DO UPDATE para cada tabela seguindo as regras definidas.
-
-    Parâmetros:
-        local_path: caminho do arquivo SQLite local (alterações do usuário)
-        remote_path: caminho do arquivo SQLite baixado do GitHub (estado remoto)
-        output_path: caminho para o arquivo SQLite de saída (resultado do merge)
-
-    Exceções:
-        Propaga exceções de I/O e SQL em caso de falha.
     """
     # 1) Copia o banco REMOTO para o arquivo de saída
     shutil.copyfile(remote_path, output_path)
