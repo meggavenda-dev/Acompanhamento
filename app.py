@@ -545,6 +545,7 @@ with tabs[0]:
 
 
 
+
 # ====================================================================================
 # 🩺 Aba 2: Cirurgias — União (ocultando colunas técnicas) + salvar mover/atualizar
 # ====================================================================================
@@ -638,6 +639,7 @@ with tabs[1]:
 
     # -------- Montar a Lista de Cirurgias com união (Cirurgias + Base) --------
     try:
+        # Ignorar Ano/Mês quando houver filtro por Situação
         if ignorar_periodo_por_situacao:
             ano_mes_str = None
             ano_base = None
@@ -686,7 +688,10 @@ with tabs[1]:
 
         # Base de candidatos (ignora período se filtro de Situação estiver ativo)
         base_rows = find_registros_para_prefill(
-            hosp_cad, ano=ano_base, mes=mes_base, prestadores=prestadores_lista_filtro
+            hosp_cad,
+            ano=ano_base,
+            mes=mes_base,
+            prestadores=prestadores_lista_filtro
         )
         df_base = pd.DataFrame(base_rows, columns=["Hospital", "Data", "Atendimento", "Paciente", "Convenio", "Prestador"])
         if df_base.empty:
@@ -695,7 +700,7 @@ with tabs[1]:
             for col in ["Hospital", "Data", "Atendimento", "Paciente", "Convenio", "Prestador"]:
                 df_base[col] = df_base[col].fillna("").astype(str)
 
-        # Mapeia candidatos da base para o esquema de cirurgias (✅ linha corrigida: "updated_at")
+        # Mapeia candidatos da base para o esquema de cirurgias
         df_base_mapped = pd.DataFrame({
             "id": [None] * len(df_base),
             "Hospital": df_base["Hospital"],
@@ -750,23 +755,35 @@ with tabs[1]:
         df_union = df_union.drop_duplicates(subset=KEY_COLS, keep="first")
         df_union.drop(columns=["_has_id"], inplace=True)
 
-        # ✅ Correção: Preservar edições anteriores usando session_state
-        if "cirurgias_editadas" not in st.session_state:
-            st.session_state["cirurgias_editadas"] = pd.DataFrame()
-        if "editor_lista_cirurgias_union" in st.session_state:
-            st.session_state["cirurgias_editadas"] = pd.DataFrame(st.session_state["editor_lista_cirurgias_union"])
-
-        if not st.session_state["cirurgias_editadas"].empty:
-            df_union = df_union.merge(
-                st.session_state["cirurgias_editadas"],
-                on=["Hospital", "Atendimento", "Paciente", "Prestador", "Data_Cirurgia"],
-                how="left",
-                suffixes=("", "_edit")
-            )
-            for col in ["Tipo (nome)", "Situação (nome)", "Convenio", "Guia_AMHPTISS", "Guia_AMHPTISS_Complemento", "Fatura", "Observacoes"]:
-                edit_col = f"{col}_edit"
-                if edit_col in df_union.columns:
-                    df_union[col] = df_union[edit_col].combine_first(df_union[col])
+        # ✅ Preservar edições anteriores usando snapshot salvo da execução anterior
+        edited_snapshot = st.session_state.get("cirurgias_editadas_snapshot")
+        if isinstance(edited_snapshot, pd.DataFrame) and not edited_snapshot.empty:
+            merge_keys = ["Hospital", "Atendimento", "Paciente", "Prestador", "Data_Cirurgia"]
+            update_cols = [
+                "Tipo (nome)", "Situação (nome)", "Convenio",
+                "Guia_AMHPTISS", "Guia_AMHPTISS_Complemento",
+                "Fatura", "Observacoes"
+            ]
+            snap_cols = [c for c in merge_keys + update_cols if c in edited_snapshot.columns]
+            if all(k in snap_cols for k in merge_keys):
+                edited_merge = edited_snapshot[snap_cols].copy()
+                # normaliza chaves para merge robusto
+                for k in merge_keys:
+                    edited_merge[k] = edited_merge[k].astype(str).fillna("").str.strip()
+                    df_union[k] = df_union[k].astype(str).fillna("").str.strip()
+                df_union = df_union.merge(
+                    edited_merge,
+                    on=merge_keys,
+                    how="left",
+                    suffixes=("", "_edit")
+                )
+                for col in update_cols:
+                    edit_col = f"{col}_edit"
+                    if edit_col in df_union.columns:
+                        df_union[col] = df_union[edit_col].combine_first(df_union[col])
+                drop_edits = [c for c in df_union.columns if c.endswith("_edit")]
+                if drop_edits:
+                    df_union.drop(columns=drop_edits, inplace=True, errors="ignore")
 
         # Guarda a união no estado para consistência
         st.session_state["df_union"] = df_union
@@ -805,6 +822,20 @@ with tabs[1]:
             key="editor_lista_cirurgias_union"
         )
         edited_df = pd.DataFrame(edited_df)
+
+        # ✅ Salva snapshot das edições para reaplicar após troca de filtros
+        _merge_keys = ["Hospital", "Atendimento", "Paciente", "Prestador", "Data_Cirurgia"]
+        _update_cols = [
+            "Tipo (nome)", "Situação (nome)", "Convenio",
+            "Guia_AMHPTISS", "Guia_AMHPTISS_Complemento",
+            "Fatura", "Observacoes"
+        ]
+        _snapshot_cols = [c for c in _merge_keys + _update_cols if c in edited_df.columns]
+        _snapshot = edited_df[_snapshot_cols].copy()
+        for k in _merge_keys:
+            if k in _snapshot.columns:
+                _snapshot[k] = _snapshot[k].astype(str).fillna("").str.strip()
+        st.session_state["cirurgias_editadas_snapshot"] = _snapshot
 
         # --- Salvar com atualização/movimentação correta (mesma lógica do seu original) ---
         if st.button("💾 Salvar alterações da Lista (atualizar/mover)"):
@@ -893,7 +924,7 @@ with tabs[1]:
                 st.cache_data.clear()
                 try_vacuum_safely()
 
-                # (sincronização GitHub permanece igual ao seu original — se aplicável)
+                # Sincronização GitHub (se habilitada)
                 if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
                     try:
                         ok, status, msg = safe_upload_with_merge(
@@ -942,7 +973,7 @@ with tabs[1]:
                 st.error("Falha ao exportar Excel.")
                 st.exception(e)
 
-        # Exclusões rápidas (idem original)
+        # Exclusões rápidas
         with st.expander("🗑️ Excluir por ID / por chave / por filtros", expanded=False):
             colD1, colD2 = st.columns(2)
             with colD1:
@@ -1065,7 +1096,6 @@ with tabs[1]:
     except Exception as e:
         st.error("Erro ao montar a lista de cirurgias.")
         st.exception(e)
-
 
 # ====================================================================================
 # 📚 Aba 3: Cadastro (Tipos & Situações)
