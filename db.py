@@ -5,6 +5,7 @@ import os, math, tempfile
 from typing import Dict, Any, List, Optional, Sequence, Tuple
 from datetime import datetime
 from sqlalchemy import create_engine, text
+import pandas as pd  # ✅ necessário para normalizações no upsert
 
 # =============================================================================
 # CONFIGURAÇÃO DO BANCO
@@ -35,7 +36,7 @@ def _safe_int(v, default=0):
         if v is None: return default
         if isinstance(v, float) and math.isnan(v): return default
         return int(float(str(v).strip()))
-    except: 
+    except:
         return default
 
 def _safe_str(v, default=""):
@@ -162,19 +163,43 @@ def delete_all_cirurgias() -> int:
 # =============================================================================
 # PACIENTES (UPSERT / LEITURAS)
 # =============================================================================
-def upsert_dataframe(df):
+def upsert_dataframe(df) -> Tuple[int, int]:
     """
     Salva DataFrame na tabela base (pacientes_unicos_por_dia_prestador).
     Usa ON CONFLICT p/ atualizar Aviso, Convenio, Quarto.
+
+    Regras:
+    - Aceita Atendimento vazio se Paciente vier preenchido (e vice-versa).
+    - Ignora linhas onde ambos (Atendimento e Paciente) estão vazios.
+    - Retorna (linhas_salvas, linhas_ignoradas).
     """
-    if df is None or df.empty: 
-        return
-    if (df["Paciente"].astype(str).str.strip() == "").any():
-        raise ValueError("Existem pacientes vazios — corrija antes de salvar.")
+    if df is None:
+        return (0, 0)
+
+    df = pd.DataFrame(df).copy()
+    if df.empty:
+        return (0, 0)
+
     ensure_unique_indexes()
+
+    # Normaliza colunas esperadas
+    for col in ["Hospital", "Data", "Atendimento", "Paciente", "Aviso", "Convenio", "Prestador", "Quarto"]:
+        if col in df.columns:
+            df[col] = df[col].astype(str).fillna("").str.strip()
+        else:
+            df[col] = ""
+
+    # Chave mínima: (Atendimento OU Paciente) + Hospital + Prestador + Data
+    mask_key_missing = (df["Atendimento"] == "") & (df["Paciente"] == "")
+    ignoradas = int(mask_key_missing.sum())
+    df_valid = df[~mask_key_missing]
+
+    if df_valid.empty:
+        return (0, ignoradas)
+
     engine = get_engine()
     with engine.begin() as conn:
-        for _, r in df.iterrows():
+        for _, r in df_valid.iterrows():
             conn.execute(text("""
                 INSERT INTO pacientes_unicos_por_dia_prestador
                 (Hospital, Ano, Mes, Dia, Data, Atendimento, Paciente, Aviso, Convenio, Prestador, Quarto)
@@ -198,6 +223,8 @@ def upsert_dataframe(df):
                 "Prestador": _safe_str(r.get("Prestador")),
                 "Quarto": _safe_str(r.get("Quarto")),
             })
+
+    return (len(df_valid), ignoradas)
 
 def read_all():
     engine = get_engine()
@@ -224,7 +251,6 @@ def _date_filter_clause(colname: str, ano: Optional[int], mes: Optional[int]) ->
     params = {}
     parts = []
     if ano is not None and mes is not None:
-        # 'dd/MM/yyyy' termina com '/YYYY' e contém '/MM/'
         parts.append(f"(({colname} LIKE :p1) OR ({colname} LIKE :p2))")
         params["p1"] = f"%/{mes:02d}/{ano}"
         params["p2"] = f"{ano}-{mes:02d}-%"
@@ -255,7 +281,7 @@ def find_registros_para_prefill(hospital: str,
         where.append(clause[5:] if clause.startswith(" AND ") else clause)
         params.update(p)
 
-    # Prestadores (case-sensitive no SQLite; normalize se quiser)
+    # Prestadores
     if prestadores:
         tokens = [str(p).strip() for p in prestadores if str(p).strip()]
         if tokens:
@@ -298,7 +324,7 @@ def list_registros_base_all(limit: int = 500) -> list:
 def list_procedimento_tipos(only_active=True):
     engine = get_engine()
     sql = "SELECT id, nome, ativo, ordem FROM procedimento_tipos"
-    if only_active: 
+    if only_active:
         sql += " WHERE ativo=1"
     sql += " ORDER BY ordem, nome"
     with engine.connect() as conn:
@@ -324,7 +350,7 @@ def set_procedimento_tipo_status(tid, ativo):
 def list_cirurgia_situacoes(only_active=True):
     engine = get_engine()
     sql = "SELECT id, nome, ativo, ordem FROM cirurgia_situacoes"
-    if only_active: 
+    if only_active:
         sql += " WHERE ativo=1"
     sql += " ORDER BY ordem, nome"
     with engine.connect() as conn:
