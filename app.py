@@ -172,7 +172,7 @@ with st.sidebar:
                     hard_reset_local_db()
                     st.success("Banco recriado vazio (sem sync).")
 
-                # Marca que já tratamos o estado local — evita re-download automático indevido
+                # Evita re-download automático indevido após reset
                 st.session_state["gh_db_fetched"] = True
                 st.rerun()
             except Exception as e:
@@ -379,7 +379,9 @@ with tabs[1]:
         list_cirurgia_situacoes,
         list_cirurgias,
         delete_cirurgia,
-        list_registros_base_all
+        list_registros_base_all,
+        delete_cirurgia_by_key,
+        delete_cirurgias_by_filter
     )
     from export import to_formatted_excel_cirurgias
 
@@ -677,6 +679,90 @@ with tabs[1]:
                             st.exception(e)
                 except Exception as e:
                     st.error("Falha ao excluir.")
+                    st.exception(e)
+
+        # --------- NOVO: Exclusão por chave composta (1 registro) ----------
+        with st.expander("🗑️ Excluir por chave (um registro)", expanded=False):
+            st.caption("Use quando você sabe Hospital, Atendimento, Paciente, Prestador e Data exatos.")
+            colK1, colK2 = st.columns(2)
+            with colK1:
+                key_h = st.selectbox("Hospital", options=HOSPITAL_OPCOES, index=0, key="key_hosp")
+                key_att = st.text_input("Atendimento", value="", key="key_att")
+                key_pac = st.text_input("Paciente", value="", key="key_pac")
+            with colK2:
+                key_pre = st.text_input("Prestador", value="", key="key_pre")
+                key_dt = st.text_input("Data da Cirurgia (ex.: 10/10/2025)", value="", key="key_dt")
+
+            if st.button("Apagar por chave (1 registro)"):
+                try:
+                    removed = delete_cirurgia_by_key(key_h, key_att, key_pac, key_pre, key_dt)
+                    vacuum()
+                    if removed:
+                        st.success("Registro apagado com sucesso.")
+                    else:
+                        st.info("Nenhum registro encontrado para a chave informada.")
+                    if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
+                        try:
+                            ok = upload_db_to_github(
+                                owner=GH_OWNER,
+                                repo=GH_REPO,
+                                path_in_repo=GH_PATH_IN_REPO,
+                                branch=GH_BRANCH,
+                                local_db_path=DB_PATH,
+                                commit_message="Exclusão por chave composta (1 registro)"
+                            )
+                            if ok:
+                                st.success("Sincronização automática com GitHub concluída.")
+                        except Exception as e:
+                            st.error("Falha ao sincronizar com GitHub.")
+                            st.exception(e)
+                    st.rerun()
+                except Exception as e:
+                    st.error("Falha na exclusão por chave.")
+                    st.exception(e)
+
+        # --------- NOVO: Exclusão em lote por filtros ----------
+        with st.expander("🗑️ Exclusão em lote (por filtros)", expanded=False):
+            st.caption("Hospital é obrigatório. Demais filtros opcionais; se todos vazios, nada será apagado.")
+            hosp_del = st.selectbox("Hospital", options=HOSPITAL_OPCOES, index=0, key="del_hosp")
+            atts_raw = st.text_area("Atendimentos (um por linha)", value="", height=120, key="del_atts")
+            prests_raw = st.text_area("Prestadores (um por linha)", value="", height=120, key="del_prests")
+            datas_raw = st.text_area("Datas de Cirurgia (um por linha, ex.: 10/10/2025)", value="", height=120, key="del_datas")
+
+            def _to_list(raw: str):
+                return [ln.strip() for ln in raw.splitlines() if ln.strip()]
+
+            if st.button("Apagar por filtros (lote)"):
+                try:
+                    total_apagadas = delete_cirurgias_by_filter(
+                        hospital=hosp_del,
+                        atendimentos=_to_list(atts_raw),
+                        prestadores=_to_list(prests_raw),
+                        datas=_to_list(datas_raw)
+                    )
+                    vacuum()
+                    st.success(f"{total_apagadas} cirurgia(s) apagada(s) com sucesso.")
+
+                    # Sincroniza com GitHub, se habilitado
+                    if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
+                        try:
+                            ok = upload_db_to_github(
+                                owner=GH_OWNER,
+                                repo=GH_REPO,
+                                path_in_repo=GH_PATH_IN_REPO,
+                                branch=GH_BRANCH,
+                                local_db_path=DB_PATH,
+                                commit_message=f"Exclusão em lote de cirurgias ({total_apagadas} apagadas)"
+                            )
+                            if ok:
+                                st.success("Sincronização automática com GitHub concluída.")
+                        except Exception as e:
+                            st.error("Falha ao sincronizar com GitHub.")
+                            st.exception(e)
+
+                    st.rerun()
+                except Exception as e:
+                    st.error("Falha na exclusão em lote.")
                     st.exception(e)
 
         with st.expander("🔎 Diagnóstico rápido (ver primeiros registros da base)", expanded=False):
