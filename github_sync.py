@@ -10,9 +10,9 @@ Funcionalidades:
 - upload_db_to_github(..., prev_sha=None, _return_details=False) -> bool ou (ok, new_sha, status, message)
 - safe_upload_with_merge(..., _return_details=False) -> bool ou (ok, status, message)
 
-Dependências:
-- requests (opcional; cai para urllib se ausente)
-- sqlalchemy (usada pelo módulo db_merge.py) — apenas no merge
+PATCHES:
+- ✅ Checkpoint do WAL antes de ler/enviar o arquivo (garante que o .db reflita o estado atual).
+- ✅ Função get_remote_sha(...) para atualizar o SHA remoto no app após upload bem-sucedido.
 """
 
 import base64
@@ -20,6 +20,7 @@ import json
 import os
 import shutil
 import tempfile
+import sqlite3  # ✅ novo
 from typing import Optional, Tuple, Union
 
 # Importa a função de merge do módulo externo
@@ -102,6 +103,35 @@ def _http_put_json(url: str, headers: dict, payload: dict) -> Tuple[int, bytes]:
 
 
 # =========================
+# WAL checkpoint helper (✅ novo)
+# =========================
+
+def _checkpoint_sqlite(path: str) -> None:
+    """
+    Garante que todas as transações em WAL sejam descarregadas no arquivo principal .db.
+    Usa TRUNCATE para limpar o .wal após aplicar. Tenta descartar conexões do SQLAlchemy.
+    """
+    try:
+        # Tenta descartar conexões do SQLAlchemy para evitar "database is locked"
+        try:
+            from db import dispose_engine  # depende do seu próprio módulo db.py
+            dispose_engine()
+        except Exception:
+            pass
+
+        with sqlite3.connect(path) as conn:
+            # FULL garantiria aplicar tudo; TRUNCATE aplica e limpa o .wal
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            try:
+                conn.execute("PRAGMA optimize")
+            except Exception:
+                pass
+    except Exception:
+        # Não bloqueia o upload se checkpoint falhar; apenas evita crash
+        pass
+
+
+# =========================
 # Download do .db (Contents API)
 # =========================
 
@@ -177,6 +207,9 @@ def upload_db_to_github(
         msg = "Local db file not found"
         return (False, None, 0, msg) if _return_details else False
 
+    # ✅ Força checkpoint do WAL antes de ler o arquivo
+    _checkpoint_sqlite(local_db_path)
+
     # Lê arquivo local
     with open(local_db_path, "rb") as f:
         raw = f.read()
@@ -232,6 +265,33 @@ def upload_db_to_github(
 
 
 # =========================
+# Helper para recuperar SHA remoto (✅ novo)
+# =========================
+
+def get_remote_sha(
+    owner: str,
+    repo: str,
+    path_in_repo: str,
+    branch: str,
+    token: Optional[str] = None
+) -> Optional[str]:
+    """
+    Retorna o SHA atual do blob no GitHub sem baixar o arquivo.
+    Útil para atualizar o st.session_state['gh_sha'] após upload bem-sucedido.
+    """
+    token = _resolve_token(token)
+    url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path_in_repo}?ref={branch}"
+    status, content = _http_get(url, _gh_headers(token))
+    if status != 200:
+        return None
+    try:
+        data = json.loads(content.decode("utf-8"))
+        return data.get("sha")
+    except Exception:
+        return None
+
+
+# =========================
 # Upload seguro com merge automático e retorno detalhado
 # =========================
 
@@ -257,7 +317,7 @@ def safe_upload_with_merge(
       - se _return_details=False: bool
       - se _return_details=True: (ok: bool, status: int, message: str)
     """
-    # Tentativa inicial
+    # Tentativa inicial (já inclui checkpoint dentro do upload_db_to_github)
     ok, new_sha, status, msg = upload_db_to_github(
         owner, repo, path_in_repo, branch, local_db_path, commit_message,
         token=token, prev_sha=prev_sha, _return_details=True
@@ -313,5 +373,5 @@ def safe_upload_with_merge(
 
         return (False, status2, f"Falha ao subir após merge: {msg2}") if _return_details else False
 
-    # Outros erros (inclui 422)
+    # Outros erros (inclui 422) 
     return (False, status, f"Falha inicial de upload: {msg}") if _return_details else False
