@@ -657,7 +657,14 @@ with tabs[1]:
             ano_base = int(ano_cad) if usar_periodo else None
             mes_base = int(mes_cad) if usar_periodo else None
 
-        rows_cir = list_cirurgias(hospital=hosp_cad, ano_mes=ano_mes_str, prestador=None)
+        
+        rows_cir = list_cirurgias(
+            hospital=hosp_cad,
+            ano_mes=None if ignorar_periodo_por_situacao else ano_mes_str,
+            prestador=None,
+            situacoes=sit_filter_ids if sit_filter_ids else None
+        )
+
         df_cir = pd.DataFrame(rows_cir, columns=[
             "id", "Hospital", "Atendimento", "Paciente", "Prestador", "Data_Cirurgia",
             "Convenio", "Procedimento_Tipo_ID", "Situacao_ID",
