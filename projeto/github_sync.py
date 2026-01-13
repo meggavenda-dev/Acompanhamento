@@ -1,212 +1,317 @@
-import io
-import csv
-import re
-import unicodedata
-import numpy as np
-import pandas as pd
+
+# -*- coding: utf-8 -*-
+"""
+github_sync.py — Sincronização do arquivo SQLite (.db) com o GitHub (Contents API),
+com controle de versão via 'sha', preflight GET (create vs update) e
+merge automático em caso de conflito (409) com retorno detalhado.
+
+Funcionalidades:
+- download_db_from_github(..., return_sha=False) -> bool ou (bool, sha)
+- upload_db_to_github(..., prev_sha=None, _return_details=False) -> bool ou (ok, new_sha, status, message)
+- safe_upload_with_merge(..., _return_details=False) -> bool ou (ok, status, message)
+
+Dependências:
+- requests (opcional; cai para urllib se ausente)
+- sqlalchemy (usada pelo módulo db_merge.py) — apenas no merge
+"""
+
+import base64
+import json
+import os
+import shutil
+import tempfile
+from typing import Optional, Tuple, Union
+
+# Importa a função de merge do módulo externo
+from db_merge import merge_sqlite_dbs
+
+# HTTP: usa 'requests' se disponível; senão, 'urllib'
+try:
+    import requests
+    _HAS_REQUESTS = True
+except Exception:
+    _HAS_REQUESTS = False
+    import urllib.request
+    import urllib.error
+
 
 # =========================
-# Regex / Constantes
+# Helpers de Token/Headers
 # =========================
 
-TIME_RE = re.compile(r"^\d{1,2}:\d{2}$")
-DATE_RE = re.compile(r"\b(\d{2}/\d{2}/\d{4})\b")
-HAS_LETTER_RE = re.compile(r"[A-Za-zÁÉÍÓÚÃÕÇáéíóúãõç]")
-SECTION_KEYWORDS = ["CENTRO CIRURGICO", "HEMODINAMICA", "CENTRO OBSTETRICO"]
+def _resolve_token(token: Optional[str]) -> Optional[str]:
+    """
+    Resolve token a partir de:
+    - parâmetro explícito
+    - st.secrets["GITHUB_TOKEN"] (se streamlit presente e segredo definido)
+    - os.environ["GITHUB_TOKEN"]
+    """
+    if token:
+        return token
+    try:
+        import streamlit as st
+        tok = st.secrets.get("GITHUB_TOKEN")
+        if tok:
+            return tok
+    except Exception:
+        pass
+    return os.environ.get("GITHUB_TOKEN")
 
-EXPECTED_COLS = [
-    "Centro", "Data", "Atendimento", "Paciente", "Aviso",
-    "Hora_Inicio", "Hora_Fim", "Cirurgia", "Convenio", "Prestador",
-    "Anestesista", "Tipo_Anestesia", "Quarto"
-]
 
-REQUIRED_COLS = [
-    "Data", "Prestador", "Hora_Inicio",
-    "Atendimento", "Paciente", "Aviso",
-    "Convenio", "Quarto"
-]
-
-PROCEDURE_HINTS = {
-    "HERNIA", "HERNIORRAFIA", "COLECISTECTOMIA", "APENDICECTOMIA",
-    "ENDOMETRIOSE", "SINOVECTOMIA", "OSTEOCONDROPLASTIA", "ARTROPLASTIA",
-    "ADENOIDECTOMIA", "AMIGDALECTOMIA", "ETMOIDECTOMIA", "SEPTOPLASTIA",
-    "TURBINECTOMIA", "MIOMECTOMIA", "HISTEROSCOPIA", "HISTERECTOMIA",
-    "ENXERTO", "TENOLISE", "MICRONEUROLISE", "URETERO", "NEFRECTOMIA",
-    "LAPAROTOMIA", "LAPAROSCOPICA", "ROBOTICA", "BIOPSIA", "CRANIOTOMIA",
-    "RETIRADA", "DRENAGEM", "FISTULECTOMIA", "HEMOSTA", "ARTRODESE",
-    "OSTEOTOMIA", "SEPTOPLASTA", "CIRURGIA", "EXERESE", "RESSECCAO",
-    "URETEROLITOTRIPSIA", "URETEROSCOPIA", "ENDOSCOPICA", "ENDOSCOPIA",
-    "CATETER", "CERVICOTOMIA", "TIREOIDECTOMIA", "LINFADENECTOMIA", 
-    "RECONSTRUÇÃO", "RETOSSIGMOIDECTOMIA", "PLEUROSCOPIA",
-}
-
-# =========================
-# Funções Auxiliares
-# =========================
-
-def _is_probably_procedure_token(tok) -> bool:
-    if tok is None or pd.isna(tok): return False
-    T = str(tok).upper().strip()
-    if any(h in T for h in PROCEDURE_HINTS): return True
-    if any(c in T for c in [",", "/", "(", ")", "%", "  ", "-"]): return True
-    if len(T) > 50: return True
-    return False
-
-def _strip_accents(s: str) -> str:
-    if s is None or pd.isna(s): return ""
-    s = str(s)
-    return "".join(ch for ch in unicodedata.normalize("NFKD", s) if not unicodedata.combining(ch))
-
-def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty: return df
-    df.columns = [str(c).replace("\ufeff", "").strip() for c in df.columns]
-    col_map = {
-        "Convênio": "Convenio", "Convênio*": "Convenio",
-        "Tipo Anestesia": "Tipo_Anestesia", "Hora Inicio": "Hora_Inicio",
-        "Hora Início": "Hora_Inicio", "Hora Fim": "Hora_Fim",
-        "Centro Cirurgico": "Centro", "Centro Cirúrgico": "Centro",
+def _gh_headers(token: Optional[str]) -> dict:
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "github-sync-sqlite/1.2",
     }
-    df.rename(columns=col_map, inplace=True)
-    return df
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _http_get(url: str, headers: dict) -> Tuple[int, bytes]:
+    if _HAS_REQUESTS:
+        resp = requests.get(url, headers=headers)
+        return resp.status_code, resp.content
+    # urllib fallback
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return resp.getcode(), resp.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+    except urllib.error.URLError:
+        return 0, b""
+
+
+def _http_put_json(url: str, headers: dict, payload: dict) -> Tuple[int, bytes]:
+    body = json.dumps(payload).encode("utf-8")
+    hdrs = dict(headers)
+    hdrs["Content-Type"] = "application/json"
+    if _HAS_REQUESTS:
+        resp = requests.put(url, headers=hdrs, data=json.dumps(payload))
+        return resp.status_code, resp.content
+    # urllib fallback
+    req = urllib.request.Request(url, headers=hdrs, data=body, method="PUT")
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return resp.getcode(), resp.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+    except urllib.error.URLError:
+        return 0, b""
+
 
 # =========================
-# Parser de texto bruto (CORRIGIDO)
+# Download do .db (Contents API)
 # =========================
 
-def _parse_raw_text_to_rows(text: str) -> pd.DataFrame:
-    rows = []
-    current_section = None
-    current_date_str = None
-    ctx = {"atendimento": None, "paciente": None, "aviso": None, "hora_inicio": None, "hora_fim": None, "quarto": None}
-    row_idx = 0
+def download_db_from_github(
+    owner: str,
+    repo: str,
+    path_in_repo: str,
+    branch: str,
+    local_db_path: str,
+    token: Optional[str] = None,
+    return_sha: bool = False
+) -> Union[bool, Tuple[bool, Optional[str]]]:
+    """
+    Baixa um arquivo binário do repositório GitHub (Contents API) e salva em 'local_db_path'.
+    Se o arquivo não existir no repo/branch, retorna False (e None se return_sha=True).
+    """
+    token = _resolve_token(token)
+    url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path_in_repo}?ref={branch}"
+    status, content = _http_get(url, _gh_headers(token))
+    if status == 404:
+        return (False, None) if return_sha else False
+    if status != 200:
+        return (False, None) if return_sha else False
 
-    for line in text.splitlines():
-        # CORREÇÃO: Captura data apenas se for linha de "Data de Realização"
-        if "Data de Realização" in line or "Data de Realiza" in line:
-            m_date = DATE_RE.search(line)
-            if m_date:
-                current_date_str = m_date.group(1)
+    try:
+        data = json.loads(content.decode("utf-8"))
+    except Exception:
+        return (False, None) if return_sha else False
+
+    # 'content' vem base64; 'sha' contém a versão atual do blob
+    content_b64 = data.get("content")
+    if not content_b64:
+        return (False, None) if return_sha else False
+
+    blob = base64.b64decode(content_b64)
+    os.makedirs(os.path.dirname(local_db_path), exist_ok=True)
+    with open(local_db_path, "wb") as f:
+        f.write(blob)
+
+    sha = data.get("sha")
+    return (True, sha) if return_sha else True
+
+
+# =========================
+# Upload do .db (Contents API) com preflight GET
+# =========================
+
+def upload_db_to_github(
+    owner: str,
+    repo: str,
+    path_in_repo: str,
+    branch: str,
+    local_db_path: str,
+    commit_message: str,
+    token: Optional[str] = None,
+    prev_sha: Optional[str] = None,
+    _return_details: bool = False
+) -> Union[bool, Tuple[bool, Optional[str], int, str]]:
+    """
+    Faz upload (PUT) do arquivo local para o GitHub (Contents API).
+    - Se 'prev_sha' for informado, tenta update diretamente com esse sha.
+    - Se 'prev_sha' for None, primeiro faz GET para descobrir se o arquivo existe:
+        * 200: arquivo existe -> usa sha do remoto no payload (update)
+        * 404: arquivo não existe -> cria (sem sha)
+    - Retorna:
+        * _return_details=False: bool
+        * _return_details=True: (ok, new_sha, status_code, message)
+    """
+    token = _resolve_token(token)
+    url_put = f"https://api.github.com/repos/{owner}/{repo}/contents/{path_in_repo}"
+
+    if not os.path.exists(local_db_path):
+        msg = "Local db file not found"
+        return (False, None, 0, msg) if _return_details else False
+
+    # Lê arquivo local
+    with open(local_db_path, "rb") as f:
+        raw = f.read()
+    if len(raw) == 0:
+        msg = "Local db file is empty (0 bytes)"
+        return (False, None, 422, msg) if _return_details else False
+
+    b64 = base64.b64encode(raw).decode("utf-8")
+
+    # Decide entre create/update
+    sha_to_use = prev_sha
+    if not sha_to_use:
+        # Descobre se o arquivo existe
+        url_get = f"https://api.github.com/repos/{owner}/{repo}/contents/{path_in_repo}?ref={branch}"
+        status_get, content_get = _http_get(url_get, _gh_headers(token))
+        if status_get == 200:
+            try:
+                data_get = json.loads(content_get.decode("utf-8"))
+                sha_to_use = data_get.get("sha")
+            except Exception:
+                sha_to_use = None
+        elif status_get == 404:
+            sha_to_use = None
+        else:
+            # Falha em descobrir; retorne erro detalhado
+            msg = f"Preflight GET failed (status={status_get})"
+            return (False, None, status_get, msg) if _return_details else False
+
+    payload = {
+        "message": commit_message,
+        "content": b64,
+        "branch": branch,
+    }
+    if sha_to_use:
+        payload["sha"] = sha_to_use  # update
+    # else: create
+
+    status_put, content_put = _http_put_json(url_put, _gh_headers(token), payload)
+    if status_put in (200, 201):
+        try:
+            data_put = json.loads(content_put.decode("utf-8"))
+            new_sha = (data_put.get("content") or {}).get("sha")
+        except Exception:
+            new_sha = None
+        return (True, new_sha, status_put, "OK") if _return_details else True
+
+    # Retorna a mensagem do GitHub (body) para diagnóstico
+    try:
+        msg = content_put.decode("utf-8")
+    except Exception:
+        msg = ""
+    return (False, None, status_put, msg) if _return_details else False
+
+
+# =========================
+# Upload seguro com merge automático e retorno detalhado
+# =========================
+
+def safe_upload_with_merge(
+    owner: str,
+    repo: str,
+    path_in_repo: str,
+    branch: str,
+    local_db_path: str,
+    commit_message: str,
+    token: Optional[str] = None,
+    prev_sha: Optional[str] = None,
+    _return_details: bool = False
+) -> Union[bool, Tuple[bool, int, str]]:
+    """
+    Tenta upload com 'prev_sha'. Em conflito (409):
+      1) Baixa remoto (pega 'remote_sha2')
+      2) Mescla local+remoto (merge_sqlite_dbs)
+      3) Substitui local pelo mesclado
+      4) Reenvia com prev_sha atualizado
+
+    Retorno:
+      - se _return_details=False: bool
+      - se _return_details=True: (ok: bool, status: int, message: str)
+    """
+    # Tentativa inicial
+    ok, new_sha, status, msg = upload_db_to_github(
+        owner, repo, path_in_repo, branch, local_db_path, commit_message,
+        token=token, prev_sha=prev_sha, _return_details=True
+    )
+    if ok and new_sha:
+        return (True, status, "Upload OK") if _return_details else True
+
+    if status == 409:
+        # Conflito → baixar remoto e mesclar
+        tmp_remote = tempfile.NamedTemporaryFile(prefix="remote_", suffix=".db", delete=False)
+        tmp_remote_path = tmp_remote.name
+        tmp_remote.close()
+
+        downloaded, remote_sha2 = download_db_from_github(
+            owner, repo, path_in_repo, branch, tmp_remote_path, token=token, return_sha=True
+        )
+        if not downloaded:
+            # não conseguiu baixar remoto
+            try: os.unlink(tmp_remote_path)
+            except Exception: pass
+            msg2 = "Conflito 409, mas falha ao baixar remoto"
+            return (False, 409, msg2) if _return_details else False
+
+        tmp_merged = tempfile.NamedTemporaryFile(prefix="merged_", suffix=".db", delete=False)
+        tmp_merged_path = tmp_merged.name
+        tmp_merged.close()
 
         try:
-            tokens = next(csv.reader([line]))
-            tokens = [t.strip() for t in tokens if t is not None]
-        except: continue
-        
-        if not tokens: continue
+            merge_sqlite_dbs(local_db_path, tmp_remote_path, tmp_merged_path)
+            # substitui local
+            shutil.move(tmp_merged_path, local_db_path)
+        except Exception as e:
+            # Falha no merge
+            try: os.unlink(tmp_merged_path)
+            except Exception: pass
+            try: os.unlink(tmp_remote_path)
+            except Exception: pass
+            msg2 = f"Falha no merge: {e}"
+            return (False, 409, msg2) if _return_details else False
 
-        if "Centro Cirurgico" in line or "Centro Cirúrgico" in line:
-            current_section = next((kw for kw in SECTION_KEYWORDS if kw in line), None)
-            ctx = {k: None for k in ctx}
-            continue
+        # Reenvia com sha atualizado do remoto
+        ok2, new_sha2, status2, msg2 = upload_db_to_github(
+            owner, repo, path_in_repo, branch, local_db_path,
+            f"{commit_message} (merge automático)", token=token, prev_sha=remote_sha2,
+            _return_details=True
+        )
 
-        header_phrases = ["Hora", "Atendimento", "Paciente", "Convênio", "Prestador"]
-        if any(h in line for h in header_phrases): continue
+        try: os.unlink(tmp_remote_path)
+        except Exception: pass
 
-        time_idxs = [i for i, t in enumerate(tokens) if TIME_RE.match(t)]
-        if time_idxs:
-            h0 = time_idxs[0]
-            h1 = h0 + 1 if (h0 + 1 < len(tokens) and TIME_RE.match(tokens[h0+1])) else None
-            hora_inicio, hora_fim = tokens[h0], (tokens[h1] if h1 else None)
+        if ok2 and new_sha2:
+            return (True, status2, "Upload após merge OK") if _return_details else True
 
-            aviso = tokens[h0-1] if (h0-1 >= 0 and re.fullmatch(r"\d{3,}", tokens[h0-1])) else None
-            atendimento, paciente = None, None
+        return (False, status2, f"Falha ao subir após merge: {msg2}") if _return_details else False
 
-            for i, t in enumerate(tokens):
-                if re.fullmatch(r"\d{7,10}", t):
-                    atendimento = t
-                    upper_bound = (h0 - 2) if h0 else len(tokens)-1
-                    for j in range(i+1, upper_bound+1):
-                        if j < len(tokens) and HAS_LETTER_RE.search(tokens[j]) and not TIME_RE.match(tokens[j]) and not _is_probably_procedure_token(tokens[j]):
-                            paciente = tokens[j]
-                            break
-                    break
-
-            base_idx = h1 if h1 else h0
-            cirurgia = tokens[base_idx + 1] if base_idx + 1 < len(tokens) else None
-            convenio = tokens[base_idx + 2] if base_idx + 2 < len(tokens) else None
-            
-            # CORREÇÃO: Se o campo do Prestador tiver uma data (Nascimento), pula para o próximo token
-            p_cand = tokens[base_idx + 3] if base_idx + 3 < len(tokens) else None
-            if p_cand and DATE_RE.search(p_cand):
-                prestador = tokens[base_idx + 4] if base_idx + 4 < len(tokens) else p_cand
-                anest, tipo, quarto = (tokens[base_idx+i] if base_idx+i < len(tokens) else None for i in [5,6,7])
-            else:
-                prestador = p_cand
-                anest, tipo, quarto = (tokens[base_idx+i] if base_idx+i < len(tokens) else None for i in [4,5,6])
-
-            rows.append({
-                "Centro": current_section, "Data": current_date_str, "Atendimento": atendimento,
-                "Paciente": paciente, "Aviso": aviso, "Hora_Inicio": hora_inicio, "Hora_Fim": hora_fim,
-                "Cirurgia": cirurgia, "Convenio": convenio, "Prestador": prestador,
-                "Anestesista": anest, "Tipo_Anestesia": tipo, "Quarto": quarto, "_row_idx": row_idx
-            })
-            ctx.update({"atendimento": atendimento, "paciente": paciente, "aviso": aviso, "hora_inicio": hora_inicio, "quarto": quarto})
-            row_idx += 1
-            continue
-
-        if current_section and any(t for t in tokens):
-            nonempty = [t for t in tokens if t]
-            if len(nonempty) >= 4:
-                rows.append({
-                    "Centro": current_section, "Data": current_date_str, "Atendimento": ctx["atendimento"],
-                    "Paciente": ctx["paciente"], "Aviso": ctx["aviso"], "Hora_Inicio": ctx["hora_inicio"],
-                    "Cirurgia": nonempty[0], "Convenio": nonempty[-5] if len(nonempty)>=5 else None,
-                    "Prestador": nonempty[-4], "Anestesista": nonempty[-3], "Tipo_Anestesia": nonempty[-2],
-                    "Quarto": nonempty[-1], "_row_idx": row_idx
-                })
-                row_idx += 1
-    return pd.DataFrame(rows)
-
-# =========================
-# Herança e Pipeline
-# =========================
-
-def _herdar_por_data_ordem_original(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty: return df
-    df = df.copy()
-    df.replace({"": pd.NA}, inplace=True)
-    df["Data"] = df["Data"].ffill().bfill()
-
-    for _, grp in df.groupby("Data", sort=False):
-        l_att, l_pac, l_av = pd.NA, pd.NA, pd.NA
-        for i in grp.sort_values("_row_idx").index:
-            att, pac, av = df.at[i, "Atendimento"], df.at[i, "Paciente"], df.at[i, "Aviso"]
-            if pd.notna(att): l_att = att
-            if pd.notna(pac): l_pac = pac
-            if pd.notna(av): l_av = av
-
-            if pd.notna(df.at[i, "Prestador"]):
-                if pd.isna(att): df.at[i, "Atendimento"] = l_att
-                if pd.isna(av): df.at[i, "Aviso"] = l_av
-                if pd.isna(pac): df.at[i, "Paciente"] = l_pac if pd.notna(l_pac) else pd.NA
-    return df
-
-def process_uploaded_file(upload, prestadores_lista, selected_hospital: str):
-    name = upload.name.lower()
-    if name.endswith(".csv"):
-        try:
-            df_in = pd.read_csv(upload, sep=",", encoding="utf-8")
-            if len(set(EXPECTED_COLS) & set(df_in.columns)) < 6:
-                upload.seek(0); text = upload.read().decode("utf-8", errors="ignore")
-                df_in = _parse_raw_text_to_rows(text)
-        except:
-            upload.seek(0); text = upload.read().decode("utf-8", errors="ignore")
-            df_in = _parse_raw_text_to_rows(text)
-    else:
-        text = upload.read().decode("utf-8", errors="ignore")
-        df_in = _parse_raw_text_to_rows(text)
-
-    df_in = _normalize_columns(df_in)
-    df_in["__pac_raw"] = df_in["Paciente"]
-    df = _herdar_por_data_ordem_original(df_in)
-
-    target = [_strip_accents(p).strip().upper() for p in prestadores_lista]
-    df["Prestador_norm"] = df["Prestador"].apply(lambda x: _strip_accents(x).strip().upper())
-    df = df[df["Prestador_norm"].isin(target)].copy()
-
-    df["Paciente"] = df["__pac_raw"]
-    dt = pd.to_datetime(df["Data"], format="%d/%m/%Y", errors="coerce")
-    df["Hospital"], df["Ano"], df["Mes"], df["Dia"] = selected_hospital, dt.dt.year, dt.dt.month, dt.dt.day
-
-    cols = ["Hospital", "Ano", "Mes", "Dia", "Data", "Atendimento", "Paciente", "Aviso", "Convenio", "Prestador", "Quarto"]
-    return df[cols].sort_values(["Ano", "Mes", "Dia", "Paciente"]).reset_index(drop=True)
+    # Outros erros (inclui 422)
+    return (False, status, f"Falha inicial de upload: {msg}") if _return_details else False
