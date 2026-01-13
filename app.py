@@ -126,12 +126,11 @@ with st.sidebar:
 
     def _sync_after_reset(commit_message: str):
         """
-        Para resets parciais/total: sobe a versão local para o GitHub.
-        Usa upload direto com prev_sha para refletir o reset.
+        Para resets parciais/total: sobe a versão local para o GitHub com detalhes.
         """
         if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
             try:
-                ok, new_sha, status = upload_db_to_github(
+                ok, new_sha, status, msg = upload_db_to_github(
                     owner=GH_OWNER,
                     repo=GH_REPO,
                     path_in_repo=GH_PATH_IN_REPO,
@@ -145,7 +144,7 @@ with st.sidebar:
                     st.session_state["gh_sha"] = new_sha or st.session_state.get("gh_sha")
                     st.success("Sincronização automática com GitHub concluída.")
                 else:
-                    st.error(f"Falha ao sincronizar com GitHub (status={status}).")
+                    st.error(f"Falha ao sincronizar com GitHub (status={status}). {msg}")
             except Exception as e:
                 st.error("Falha ao sincronizar com GitHub.")
                 st.exception(e)
@@ -342,7 +341,7 @@ with tabs[0]:
                 total = count_all()
                 st.success(f"Dados salvos com sucesso. Total de linhas no banco: {total}")
 
-                # 🔁 Sincroniza com GitHub com merge automático em caso de conflito
+                # 🔁 Sincroniza com GitHub com merge automático em caso de conflito + detalhes
                 if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
                     try:
                         ok, status, msg = safe_upload_with_merge(
@@ -381,7 +380,7 @@ with tabs[0]:
         )
 
     st.divider()
-    st.markdown("#### Conteúdo atual do banco (exemplo.db)")
+    st.markdown(" #### Conteúdo atual do banco (exemplo.db)")
     rows = read_all()
     if rows:
         cols = ["Hospital", "Ano", "Mes", "Dia", "Data", "Atendimento", "Paciente", "Aviso", "Convenio", "Prestador", "Quarto"]
@@ -648,7 +647,7 @@ with tabs[1]:
                             num_skip += 1
                     st.success(f"UPSERT concluído. {num_ok} linha(s) salvas; {num_skip} ignorada(s) (chave incompleta).")
 
-                    # 🔁 Sync GitHub com merge automático
+                    # 🔁 Sync GitHub com merge automático + detalhes
                     if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
                         try:
                             ok, status, msg = safe_upload_with_merge(
@@ -932,7 +931,7 @@ with tabs[2]:
                 ativo_padrao = bool(st.session_state.get(f"tipo_bulk_ativo_{suffix}", True))
 
                 linhas = [ln.strip() for ln in raw_text.splitlines()]
-                nomes = [ln for ln in linhas if ln]
+                nomes = [ln for ln in linhas se ln]
                 if not nomes:
                     st.warning("Nada a cadastrar: informe ao menos um nome de tipo.")
                     return
@@ -956,7 +955,7 @@ with tabs[2]:
                 st.session_state["df_tipos_cached"] = df3
 
                 st.success(f"Cadastro em lote concluído. Criados/atualizados: {num_new} | ignorados: {num_skip}")
-                prox_id = (df3["id"].max() + 1) if not df3.empty else 1
+                prox_id = (df3["id"].max() + 1) si not df3.empty else 1
                 st.info(f"Próximo ID previsto: {prox_id}")
 
                 _upload_db_catalogo("Atualiza catálogo de Tipos (cadastro em lote)")
