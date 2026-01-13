@@ -546,6 +546,7 @@ with tabs[0]:
 
 
 
+
 # ====================================================================================
 # 🩺 Aba 2: Cirurgias — União (ocultando colunas técnicas) + salvar mover/atualizar
 # ====================================================================================
@@ -591,30 +592,37 @@ with tabs[1]:
         if ts:
             st.caption(f"Último recarregamento: {ts}")
 
-    # -------- Carregar catálogos (para dropdowns do grid) --------
-    tipos_rows = list_procedimento_tipos(only_active=True)
-    df_tipos_cat = pd.DataFrame(tipos_rows, columns=["id", "nome", "ativo", "ordem"]) if tipos_rows else pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
-    if not df_tipos_cat.empty:
-        df_tipos_cat = df_tipos_cat.sort_values(["ordem", "nome"], kind="mergesort")
-        tipo_nome_list = df_tipos_cat["nome"].tolist()
-        tipo_nome2id = dict(zip(df_tipos_cat["nome"], df_tipos_cat["id"]))  # nome -> id
-        tipo_id2nome = dict(zip(df_tipos_cat["id"], df_tipos_cat["nome"]))  # id -> nome
+    # -------- Carregar catálogos --------
+    # (1) Ativos: servem para opções dos dropdowns
+    tipos_rows_active = list_procedimento_tipos(only_active=True)
+    df_tipos_active = pd.DataFrame(tipos_rows_active, columns=["id", "nome", "ativo", "ordem"]) if tipos_rows_active else pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
+    if not df_tipos_active.empty:
+        df_tipos_active = df_tipos_active.sort_values(["ordem", "nome"], kind="mergesort")
+        tipo_nome_list = df_tipos_active["nome"].tolist()
+        tipo_nome2id = dict(zip(df_tipos_active["nome"], df_tipos_active["id"]))  # nome -> id (opções)
     else:
         tipo_nome_list = []
         tipo_nome2id = {}
-        tipo_id2nome = {}
 
-    sits_rows = list_cirurgia_situacoes(only_active=True)
-    df_sits_cat = pd.DataFrame(sits_rows, columns=["id", "nome", "ativo", "ordem"]) if sits_rows else pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
-    if not df_sits_cat.empty:
-        df_sits_cat = df_sits_cat.sort_values(["ordem", "nome"], kind="mergesort")
-        sit_nome_list = df_sits_cat["nome"].tolist()
-        sit_nome2id = dict(zip(df_sits_cat["nome"], df_sits_cat["id"]))
-        sit_id2nome = dict(zip(df_sits_cat["id"], df_sits_cat["nome"]))
+    # (2) COMPLETO (ativos + inativos): serve para exibir nomes de IDs salvos no banco
+    tipos_rows_all = list_procedimento_tipos(only_active=False)
+    df_tipos_all = pd.DataFrame(tipos_rows_all, columns=["id", "nome", "ativo", "ordem"]) if tipos_rows_all else pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
+    tipo_id2nome_all = dict(zip(df_tipos_all["id"], df_tipos_all["nome"])) if not df_tipos_all.empty else {}
+
+    # Situações — mesma lógica de Tipos
+    sits_rows_active = list_cirurgia_situacoes(only_active=True)
+    df_sits_active = pd.DataFrame(sits_rows_active, columns=["id", "nome", "ativo", "ordem"]) if sits_rows_active else pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
+    if not df_sits_active.empty:
+        df_sits_active = df_sits_active.sort_values(["ordem", "nome"], kind="mergesort")
+        sit_nome_list = df_sits_active["nome"].tolist()
+        sit_nome2id = dict(zip(df_sits_active["nome"], df_sits_active["id"]))  # nome -> id (opções)
     else:
         sit_nome_list = []
         sit_nome2id = {}
-        sit_id2nome = {}
+
+    sits_rows_all = list_cirurgia_situacoes(only_active=False)
+    df_sits_all = pd.DataFrame(sits_rows_all, columns=["id", "nome", "ativo", "ordem"]) if sits_rows_all else pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
+    sit_id2nome_all = dict(zip(df_sits_all["id"], df_sits_all["nome"])) if not df_sits_all.empty else {}
 
     if not tipo_nome_list:
         st.warning("Nenhum **Tipo de Procedimento** ativo encontrado. Cadastre na aba **📚 Cadastro (Tipos & Situações)** e marque como **Ativo**.")
@@ -673,10 +681,10 @@ with tabs[1]:
         if ignorar_periodo_por_situacao and sit_filter_ids:
             df_cir = df_cir[df_cir["Situacao_ID"].isin(sit_filter_ids)]
 
-        # Labels legíveis
+        # Labels legíveis (usando catálogos COMPLETOS para exibição)
         df_cir["Fonte"] = "Cirurgia"
-        df_cir["Tipo (nome)"] = df_cir["Procedimento_Tipo_ID"].map(tipo_id2nome).fillna("")
-        df_cir["Situação (nome)"] = df_cir["Situacao_ID"].map(sit_id2nome).fillna("")
+        df_cir["Tipo (nome)"] = df_cir["Procedimento_Tipo_ID"].map(tipo_id2nome_all).fillna("")
+        df_cir["Situação (nome)"] = df_cir["Situacao_ID"].map(sit_id2nome_all).fillna("")
 
         # metadados para mover/atualizar
         df_cir["_old_source"] = "Cirurgia"
@@ -777,10 +785,12 @@ with tabs[1]:
                     how="left",
                     suffixes=("", "_edit")
                 )
+                # ⚠️ Só sobrescreve com o que não está vazio (evita apagar dados salvos)
                 for col in update_cols:
                     edit_col = f"{col}_edit"
                     if edit_col in df_union.columns:
-                        df_union[col] = df_union[edit_col].combine_first(df_union[col])
+                        mask = df_union[edit_col].notna() & (df_union[edit_col].astype(str).str.strip() != "")
+                        df_union.loc[mask, col] = df_union.loc[mask, edit_col]
                 drop_edits = [c for c in df_union.columns if c.endswith("_edit")]
                 if drop_edits:
                     df_union.drop(columns=drop_edits, inplace=True, errors="ignore")
@@ -1096,7 +1106,6 @@ with tabs[1]:
     except Exception as e:
         st.error("Erro ao montar a lista de cirurgias.")
         st.exception(e)
-
 # ====================================================================================
 # 📚 Aba 3: Cadastro (Tipos & Situações)
 # ====================================================================================
