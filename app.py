@@ -178,7 +178,7 @@ with st.sidebar:
         """
         Para resets parciais/total: sobe a versão local para o GitHub com detalhes.
         """
-        if GITHUB_SYNC_AVAILABLE && GITHUB_TOKEN_OK:
+        if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
             try:
                 ok, new_sha, status, msg = upload_db_to_github(
                     owner=GH_OWNER,
