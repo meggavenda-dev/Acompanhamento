@@ -24,7 +24,7 @@ from db import (
     delete_cirurgia_by_key, delete_cirurgias_by_filter,
 
     # Resets
-    delete_all_cirurgias, delete_all_catalogos,
+    delete_all_cirurgias, delete_all_catalogos, hard_reset_local_db,
 )
 from processing import process_uploaded_file
 from export import to_formatted_excel_by_hospital, to_formatted_excel_cirurgias
@@ -35,7 +35,7 @@ try:
         download_db_from_github,
         safe_upload_with_merge,
         upload_db_to_github,
-        get_remote_sha,  # ✅ usado para atualizar SHA após upload
+        get_remote_sha,  # usado para atualizar SHA após upload
     )
     GITHUB_SYNC_AVAILABLE = True
 except Exception:
@@ -243,8 +243,6 @@ with st.sidebar:
     with col_r4:
         if st.button("🗑️ **RESET TOTAL** (apaga arquivo .db)", type="primary", disabled=not can_execute):
             try:
-                # recria
-                from db import hard_reset_local_db
                 hard_reset_local_db()
                 st.cache_data.clear()
                 st.success("Banco recriado vazio (local).")
@@ -278,7 +276,7 @@ with st.expander("🔎 Diagnóstico do arquivo .db (local)", expanded=False):
     size = os.path.getsize(DB_PATH) if exists else 0
     st.caption(f"Caminho: `{DB_PATH}` | Existe: {exists} | Tamanho: {size} bytes | Linhas (pacientes): {count_all()}")
 
-# Lista única de hospitais (ajuste conforme necessário)
+# Lista única de hospitais
 HOSPITAL_OPCOES = [
     "Hospital Santa Lucia Sul",
     "Hospital Santa Lucia Norte",
@@ -440,7 +438,6 @@ with tabs[0]:
                     total = count_all()
                     st.success(f"Importação concluída: {salvos} salvos, {ignoradas} ignorados (chave incompleta). Total no banco: {total}")
 
-                    # ✅ Checkpoint + VACUUM antes do upload
                     try_vacuum_safely()
 
                     if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
@@ -556,8 +553,8 @@ with tabs[1]:
     if not df_tipos_cat.empty:
         df_tipos_cat = df_tipos_cat.sort_values(["ordem", "nome"], kind="mergesort")
         tipo_nome_list = df_tipos_cat["nome"].tolist()
-        tipo_nome2id = dict(zip(df_tipos_cat["nome"], df_tipos_cat["id"]))
-        tipo_id2nome = dict(zip(df_tipos_cat["id"], df_tipos_cat["nome"]))
+        tipo_nome2id = dict(zip(df_tipos_cat["nome"], df_tipos_cat["id"]))  # nome -> id
+        tipo_id2nome = dict(zip(df_tipos_cat["id"], df_tipos_cat["nome"]))  # id -> nome
     else:
         tipo_nome_list = []
         tipo_nome2id = {}
@@ -583,8 +580,10 @@ with tabs[1]:
 
     # -------- Montar a Lista de Cirurgias com união (Cirurgias + Base) --------
     try:
-        # Cirurgias já salvas no hospital
-        rows_cir = list_cirurgias(hospital=hosp_cad, ano_mes=None, prestador=None)
+        # ✅ APLICA FILTRO DE ANO/MÊS SOBRE CIRURGIAS SALVAS
+        ano_mes_str = f"{int(ano_cad)}-{int(mes_cad):02d}" if usar_periodo else None
+
+        rows_cir = list_cirurgias(hospital=hosp_cad, ano_mes=ano_mes_str, prestador=None)
         df_cir = pd.DataFrame(rows_cir, columns=[
             "id", "Hospital", "Atendimento", "Paciente", "Prestador", "Data_Cirurgia",
             "Convenio", "Procedimento_Tipo_ID", "Situacao_ID",
@@ -599,12 +598,17 @@ with tabs[1]:
                 "Observacoes", "created_at", "updated_at"
             ])
 
+        # 🔎 Filtro de prestadores sobre cirurgias (quando informado)
+        if prestadores_lista_filtro:
+            prest_set = {p.strip().lower() for p in prestadores_lista_filtro if p.strip()}
+            df_cir = df_cir[df_cir["Prestador"].astype(str).str.lower().isin(prest_set)]
+
         # Labels legíveis
         df_cir["Fonte"] = "Cirurgia"
         df_cir["Tipo (nome)"] = df_cir["Procedimento_Tipo_ID"].map(tipo_id2nome).fillna("")
         df_cir["Situação (nome)"] = df_cir["Situacao_ID"].map(sit_id2nome).fillna("")
 
-        # ✅ metadados de chave original (para mover/atualizar)
+        # metadados para mover/atualizar
         df_cir["_old_source"] = "Cirurgia"
         df_cir["_old_h"] = df_cir["Hospital"].astype(str)
         df_cir["_old_att"] = df_cir["Atendimento"].astype(str)
@@ -612,7 +616,7 @@ with tabs[1]:
         df_cir["_old_pre"] = df_cir["Prestador"].astype(str)
         df_cir["_old_data"] = df_cir["Data_Cirurgia"].astype(str)
 
-        # Candidatos da base segundo filtros
+        # ✅ Base de candidatos já vem filtrada por Ano/Mês/Prestadores
         base_rows = find_registros_para_prefill(
             hosp_cad,
             ano=int(ano_cad) if usar_periodo else None,
@@ -626,7 +630,7 @@ with tabs[1]:
             for col in ["Hospital", "Data", "Atendimento", "Paciente", "Convenio", "Prestador"]:
                 df_base[col] = df_base[col].fillna("").astype(str)
 
-        # Mapeia candidatos da base para o esquema de cirurgias (com metadados _old_*)
+        # Mapeia candidatos da base para o esquema de cirurgias
         df_base_mapped = pd.DataFrame({
             "id": [None]*len(df_base),
             "Hospital": df_base["Hospital"],
@@ -647,7 +651,7 @@ with tabs[1]:
             "Tipo (nome)": ["" for _ in range(len(df_base))],
             "Situação (nome)": ["" for _ in range(len(df_base))],
 
-            # metadados
+            # metadados chave original
             "_old_source": ["Base"]*len(df_base),
             "_old_h": df_base["Hospital"].astype(str),
             "_old_att": df_base["Atendimento"].astype(str),
@@ -804,7 +808,6 @@ with tabs[1]:
                 st.success(f"UPSERT concluído. Atualizados={num_updated}; Movidos={num_moved}; Ignorados={num_skip}")
                 st.cache_data.clear()
 
-                # ✅ Checkpoint + VACUUM antes do upload
                 try_vacuum_safely()
 
                 if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
@@ -830,6 +833,9 @@ with tabs[1]:
                         st.error("Falha ao sincronizar com GitHub.")
                         st.exception(e)
 
+                # ✅ Recalcula a aba com filtros aplicados imediatamente
+                st.rerun()
+
             except PermissionError as pe:
                 st.error(f"Diretório/arquivo do DB não é gravável. Ajuste 'DB_DIR' ou permissões. Detalhe: {pe}")
             except Exception as e:
@@ -840,7 +846,7 @@ with tabs[1]:
         colG1, colG2 = st.columns([1, 1])
         with colG2:
             try:
-                export_hide_cols = cols_to_hide  # reutiliza lista
+                export_hide_cols = cols_to_hide
                 export_df = edited_df.drop(columns=[c for c in export_hide_cols if c in edited_df.columns], errors="ignore")
                 excel_bytes = to_formatted_excel_cirurgias(export_df)
                 st.download_button(
@@ -1380,7 +1386,7 @@ with tabs[3]:
     page = st.number_input("Página", min_value=1, max_value=max_page, value=1, step=1)
     start, end = (page - 1) * per_page, (page - 1) * per_page + per_page
     df_page = df_view.iloc[start:end].copy()
-    st.caption(f"Exibindo {len(df_page)} de {total_rows} registro(s) — página {page}/{max_page}")
+    st.caption(f"Exibindo {len[df_page]} de {total_rows} registro(s) — página {page}/{max_page}")
     st.dataframe(df_page, use_container_width=True)
 
     st.markdown("#### Exportar")
