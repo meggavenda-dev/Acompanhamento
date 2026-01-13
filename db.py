@@ -4,57 +4,95 @@
 db.py — Camada de acesso ao SQLite (persistência do app)
 
 Alterações principais:
-- Usa caminho estável (./data/exemplo.db) em vez de diretório temporário.
-- VACUUM com autocommit (fora de transação).
+- Usa caminho estável e gravável (DB_DIR via env -> ./data -> /tmp).
+- PRAGMAs úteis (FK, WAL, synchronous).
+- VACUUM robusto (checkpoint + optimize) com conexão sqlite3 dedicada.
 - Funções de reset robustas (hard_reset_local_db e hard_reset_and_upload_to_github).
 - Exclusão por chave composta e por filtros (delete_cirurgia_by_key, delete_cirurgias_by_filter).
 - Mantém UNIQUE constraints e índices únicos idempotentes.
 """
 
 from __future__ import annotations
+
 import os
 import math
+import tempfile
+import sqlite3
 from typing import Dict, Any, Optional, Sequence, Tuple, List
 from datetime import datetime
 
 import pandas as pd
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
 
 # =============================================================================
-# CONFIGURAÇÃO DO BANCO (caminho estável)
+# CONFIGURAÇÃO DO BANCO (caminho gravável)
 # =============================================================================
 
-# Pasta "data" dentro do diretório do arquivo atual
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
-os.makedirs(DATA_DIR, exist_ok=True)
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 
-DB_PATH = os.path.join(DATA_DIR, "exemplo.db")
+# Preferir variável de ambiente; senão ./data; se falhar, fallback para /tmp
+DB_DIR = os.environ.get("DB_DIR") or os.environ.get("STREAMLIT_DB_DIR")
+if not DB_DIR:
+    candidate = os.path.join(BASE_DIR, "data")
+    try:
+        os.makedirs(candidate, exist_ok=True)
+        DB_DIR = candidate
+    except Exception:
+        DB_DIR = os.path.join(tempfile.gettempdir(), "acompanhamento_db")
+        os.makedirs(DB_DIR, exist_ok=True)
+
+DB_PATH = os.path.join(DB_DIR, "exemplo.db")
 DB_URI = f"sqlite:///{DB_PATH}"
 
-_ENGINE = None
+_ENGINE: Optional[Engine] = None
 
 
-def get_engine():
+def ensure_db_writable() -> None:
+    """Garante que o diretório e o arquivo do DB são graváveis; ajusta permissões quando possível."""
+    dir_path = os.path.dirname(DB_PATH) or "."
+    if not os.path.exists(dir_path):
+        os.makedirs(dir_path, exist_ok=True)
+
+    if not os.access(dir_path, os.W_OK):
+        raise PermissionError(f"Diretório do DB não é gravável: {dir_path}")
+
+    if os.path.exists(DB_PATH):
+        try:
+            os.chmod(DB_PATH, 0o664)  # rw-rw-r--
+        except Exception:
+            # Se não conseguir, segue — o erro real aparecerá na escrita
+            pass
+
+
+def get_engine() -> Engine:
     """Retorna (e cria se necessário) a engine do SQLAlchemy."""
     global _ENGINE
     if _ENGINE is None:
-        _ENGINE = create_engine(DB_URI, future=True, echo=False)
+        _ENGINE = create_engine(
+            DB_URI,
+            future=True,
+            echo=False,
+            connect_args={"check_same_thread": False},  # útil em Streamlit
+        )
     return _ENGINE
 
 
-def dispose_engine():
-    """Fecha e descarta a engine atual (útil para reset)."""
+def dispose_engine() -> None:
+    """Fecha e descarta a engine atual (útil para reset/manutenção)."""
     global _ENGINE
     if _ENGINE:
-        _ENGINE.dispose()
-        _ENGINE = None
+        try:
+            _ENGINE.dispose()
+        finally:
+            _ENGINE = None
 
 
 # =============================================================================
 # HELPERS
 # =============================================================================
 
-def _safe_int(v, default=0):
+def _safe_int(v, default=0) -> int:
     try:
         if v is None:
             return default
@@ -65,7 +103,7 @@ def _safe_int(v, default=0):
         return default
 
 
-def _safe_str(v, default=""):
+def _safe_str(v, default: str = "") -> str:
     if v is None:
         return default
     try:
@@ -80,10 +118,10 @@ def _safe_str(v, default=""):
 # GARANTIA DE ÍNDICES ÚNICOS
 # =============================================================================
 
-def ensure_unique_indexes():
+def ensure_unique_indexes() -> None:
     """Cria índices únicos idempotentes (garante ON CONFLICT funcionando)."""
-    engine = get_engine()
-    with engine.begin() as conn:
+    eng = get_engine()
+    with eng.begin() as conn:
         # Índice único para a base de pacientes (chave resiliente)
         conn.execute(text("""
             CREATE UNIQUE INDEX IF NOT EXISTS ux_pacientes_unicos
@@ -97,84 +135,117 @@ def ensure_unique_indexes():
 
 
 # =============================================================================
-# INIT DB (com UNIQUE constraints)
+# INIT DB (com UNIQUE constraints + PRAGMAs)
 # =============================================================================
 
-def init_db():
-    """Cria tabelas caso não existam e aplica índices únicos."""
-    engine = get_engine()
-    with engine.begin() as conn:
+def init_db() -> None:
+    """Cria tabelas caso não existam e aplica índices únicos e PRAGMAs."""
+    os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
+    eng = get_engine()
+    with eng.begin() as conn:
+        # PRAGMAs úteis
+        conn.execute(text("PRAGMA foreign_keys=ON"))
+        conn.execute(text("PRAGMA journal_mode=WAL"))
+        conn.execute(text("PRAGMA synchronous=NORMAL"))
+
+        # Tabela base
         conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS pacientes_unicos_por_dia_prestador (
-            Hospital    TEXT,
-            Ano         INTEGER,
-            Mes         INTEGER,
-            Dia         INTEGER,
-            Data        TEXT,
-            Atendimento TEXT,
-            Paciente    TEXT,
-            Aviso       TEXT,
-            Convenio    TEXT,
-            Prestador   TEXT,
-            Quarto      TEXT,
-            UNIQUE(Hospital, Atendimento, Paciente, Prestador, Data)
-        );
+            CREATE TABLE IF NOT EXISTS pacientes_unicos_por_dia_prestador (
+                Hospital    TEXT,
+                Ano         INTEGER,
+                Mes         INTEGER,
+                Dia         INTEGER,
+                Data        TEXT,
+                Atendimento TEXT,
+                Paciente    TEXT,
+                Aviso       TEXT,
+                Convenio    TEXT,
+                Prestador   TEXT,
+                Quarto      TEXT,
+                UNIQUE(Hospital, Atendimento, Paciente, Prestador, Data)
+            );
+        """))
+
+        # Cirurgias
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS cirurgias (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                Hospital    TEXT,
+                Atendimento TEXT,
+                Paciente    TEXT,
+                Prestador   TEXT,
+                Data_Cirurgia TEXT,
+                Convenio    TEXT,
+                Procedimento_Tipo_ID INTEGER,
+                Situacao_ID INTEGER,
+                Guia_AMHPTISS TEXT,
+                Guia_AMHPTISS_Complemento TEXT,
+                Fatura TEXT,
+                Observacoes TEXT,
+                created_at TEXT,
+                updated_at TEXT,
+                UNIQUE(Hospital, Atendimento, Paciente, Prestador, Data_Cirurgia)
+            );
+        """))
+
+        # Catálogos
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS procedimento_tipos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nome  TEXT UNIQUE,
+                ativo INTEGER,
+                ordem INTEGER
+            );
         """))
         conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS cirurgias (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            Hospital    TEXT,
-            Atendimento TEXT,
-            Paciente    TEXT,
-            Prestador   TEXT,
-            Data_Cirurgia TEXT,
-            Convenio    TEXT,
-            Procedimento_Tipo_ID INTEGER,
-            Situacao_ID INTEGER,
-            Guia_AMHPTISS TEXT,
-            Guia_AMHPTISS_Complemento TEXT,
-            Fatura TEXT,
-            Observacoes TEXT,
-            created_at TEXT,
-            updated_at TEXT,
-            UNIQUE(Hospital, Atendimento, Paciente, Prestador, Data_Cirurgia)
-        );
+            CREATE TABLE IF NOT EXISTS cirurgia_situacoes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nome  TEXT UNIQUE,
+                ativo INTEGER,
+                ordem INTEGER
+            );
         """))
-        conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS procedimento_tipos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nome  TEXT UNIQUE,
-            ativo INTEGER,
-            ordem INTEGER
-        );
-        """))
-        conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS cirurgia_situacoes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nome  TEXT UNIQUE,
-            ativo INTEGER,
-            ordem INTEGER
-        );
-        """))
-    ensure_unique_indexes()  # garante índices únicos
+
+    ensure_unique_indexes()  # garante ON CONFLICT confiável
 
 
 # =============================================================================
 # RESET / MANUTENÇÃO
 # =============================================================================
 
-def vacuum():
+def vacuum() -> None:
     """
-    Executa VACUUM fora de transação (autocommit), obrigatório no SQLite.
-    Evita erro 'cannot VACUUM from within a transaction'.
+    Executa manutenção fora de transação:
+      - PRAGMA wal_checkpoint(TRUNCATE)
+      - VACUUM (requer write/exclusividade)
+      - PRAGMA optimize
+    Usa sqlite3 com conexão curta e sem transação.
     """
-    engine = get_engine()
-    with engine.connect() as conn:
-        conn = conn.execution_options(isolation_level="AUTOCOMMIT")
-        conn.execute(text("VACUUM"))
+    if not os.path.exists(DB_PATH):
+        raise FileNotFoundError(DB_PATH)
+
+    ensure_db_writable()
+
+    # descarte do engine atual para reduzir chance de "database is locked"
+    dispose_engine()
+
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            try:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except Exception:
+                pass
+            conn.execute("VACUUM")
+            try:
+                conn.execute("PRAGMA optimize")
+            except Exception:
+                pass
+    except sqlite3.OperationalError as e:
+        # Propaga; o app decide ignorar se for read-only
+        raise
 
 
-def reset_db_file():
+def reset_db_file() -> None:
     """
     Remove o arquivo .db e recria o schema vazio.
     Útil para 'RESET TOTAL' na UI (versão simples).
@@ -215,19 +286,21 @@ def hard_reset_and_upload_to_github(upload_fn) -> bool:
 
 def delete_all_pacientes() -> int:
     """Apaga todos os registros da base de pacientes; retorna a quantidade apagada."""
-    engine = get_engine()
-    with engine.begin() as conn:
+    ensure_db_writable()
+    eng = get_engine()
+    with eng.begin() as conn:
         total = conn.execute(text("SELECT COUNT(*) FROM pacientes_unicos_por_dia_prestador")).scalar_one()
         conn.execute(text("DELETE FROM pacientes_unicos_por_dia_prestador"))
-    return int(total)
+    return int(total or 0)
 
 
 def delete_all_catalogos() -> int:
     """Apaga todos os catálogos (tipos e situações); retorna a soma das quantidades apagadas."""
-    engine = get_engine()
-    with engine.begin() as conn:
-        t1 = conn.execute(text("SELECT COUNT(*) FROM procedimento_tipos")).scalar_one()
-        t2 = conn.execute(text("SELECT COUNT(*) FROM cirurgia_situacoes")).scalar_one()
+    ensure_db_writable()
+    eng = get_engine()
+    with eng.begin() as conn:
+        t1 = conn.execute(text("SELECT COUNT(*) FROM procedimento_tipos")).scalar_one() or 0
+        t2 = conn.execute(text("SELECT COUNT(*) FROM cirurgia_situacoes")).scalar_one() or 0
         conn.execute(text("DELETE FROM procedimento_tipos"))
         conn.execute(text("DELETE FROM cirurgia_situacoes"))
     return int(t1) + int(t2)
@@ -235,18 +308,19 @@ def delete_all_catalogos() -> int:
 
 def delete_all_cirurgias() -> int:
     """Apaga todas as cirurgias; retorna a quantidade apagada."""
-    engine = get_engine()
-    with engine.begin() as conn:
+    ensure_db_writable()
+    eng = get_engine()
+    with eng.begin() as conn:
         total = conn.execute(text("SELECT COUNT(*) FROM cirurgias")).scalar_one()
         conn.execute(text("DELETE FROM cirurgias"))
-    return int(total)
+    return int(total or 0)
 
 
 # =============================================================================
 # PACIENTES (UPSERT / LEITURAS)
 # =============================================================================
 
-def upsert_dataframe(df) -> Tuple[int, int]:
+def upsert_dataframe(df: pd.DataFrame) -> Tuple[int, int]:
     """
     Salva DataFrame na tabela base (pacientes_unicos_por_dia_prestador).
     Usa ON CONFLICT para atualizar Aviso, Convenio, Quarto.
@@ -264,6 +338,7 @@ def upsert_dataframe(df) -> Tuple[int, int]:
         return (0, 0)
 
     ensure_unique_indexes()
+    ensure_db_writable()
 
     # Normaliza colunas esperadas (defasadas viram vazias)
     for col in ["Hospital", "Data", "Atendimento", "Paciente", "Aviso", "Convenio", "Prestador", "Quarto"]:
@@ -280,8 +355,8 @@ def upsert_dataframe(df) -> Tuple[int, int]:
     if df_valid.empty:
         return (0, ignoradas)
 
-    engine = get_engine()
-    with engine.begin() as conn:
+    eng = get_engine()
+    with eng.begin() as conn:
         for _, r in df_valid.iterrows():
             conn.execute(text("""
                 INSERT INTO pacientes_unicos_por_dia_prestador
@@ -312,8 +387,8 @@ def upsert_dataframe(df) -> Tuple[int, int]:
 
 def read_all() -> List[Tuple]:
     """Lê todos os registros da base, ordenados para exibição no app."""
-    engine = get_engine()
-    with engine.connect() as conn:
+    eng = get_engine()
+    with eng.connect() as conn:
         return conn.execute(text("""
             SELECT Hospital, Ano, Mes, Dia, Data, Atendimento,
                    Paciente, Aviso, Convenio, Prestador, Quarto
@@ -324,9 +399,9 @@ def read_all() -> List[Tuple]:
 
 def count_all() -> int:
     """Conta todas as linhas da base de pacientes."""
-    engine = get_engine()
-    with engine.connect() as conn:
-        return int(conn.execute(text("SELECT COUNT(*) FROM pacientes_unicos_por_dia_prestador")).scalar_one())
+    eng = get_engine()
+    with eng.connect() as conn:
+        return int(conn.execute(text("SELECT COUNT(*) FROM pacientes_unicos_por_dia_prestador")).scalar_one() or 0)
 
 
 # =============================================================================
@@ -351,10 +426,12 @@ def _date_filter_clause(colname: str, ano: Optional[int], mes: Optional[int]) ->
     return clause, params
 
 
-def find_registros_para_prefill(hospital: str,
-                                ano: Optional[int] = None,
-                                mes: Optional[int] = None,
-                                prestadores: Optional[Sequence[str]] = None) -> list:
+def find_registros_para_prefill(
+    hospital: str,
+    ano: Optional[int] = None,
+    mes: Optional[int] = None,
+    prestadores: Optional[Sequence[str]] = None
+) -> List[Tuple]:
     """
     Retorna registros da tabela base para pré-preencher a Aba Cirurgias.
     Filtros opcionais: hospital (obrigatório), ano/mês, lista de prestadores.
@@ -390,18 +467,18 @@ def find_registros_para_prefill(hospital: str,
         WHERE {' AND '.join(where)}
         ORDER BY Data, Prestador, Atendimento, Paciente
     """
-    engine = get_engine()
-    with engine.connect() as conn:
+    eng = get_engine()
+    with eng.connect() as conn:
         return conn.execute(text(sql), params).fetchall()
 
 
-def list_registros_base_all(limit: int = 500) -> list:
+def list_registros_base_all(limit: int = 500) -> List[Tuple]:
     """
     Lista registros da base para diagnóstico rápido (limite configurável).
     """
     limit = int(limit or 500)
-    engine = get_engine()
-    with engine.connect() as conn:
+    eng = get_engine()
+    with eng.connect() as conn:
         return conn.execute(text(f"""
             SELECT Hospital, Data, Atendimento, Paciente, Convenio, Prestador
             FROM pacientes_unicos_por_dia_prestador
@@ -414,61 +491,67 @@ def list_registros_base_all(limit: int = 500) -> list:
 # CATÁLOGOS (Tipos e Situações)
 # =============================================================================
 
-def list_procedimento_tipos(only_active=True):
-    engine = get_engine()
+def list_procedimento_tipos(only_active: bool = True) -> List[Tuple]:
+    eng = get_engine()
     sql = "SELECT id, nome, ativo, ordem FROM procedimento_tipos"
     if only_active:
         sql += " WHERE ativo=1"
     sql += " ORDER BY ordem, nome"
-    with engine.connect() as conn:
+    with eng.connect() as conn:
         return conn.execute(text(sql)).fetchall()
 
 
-def upsert_procedimento_tipo(nome, ativo=1, ordem=1):
+def upsert_procedimento_tipo(nome: str, ativo: int = 1, ordem: int = 1) -> int:
     ensure_unique_indexes()
-    engine = get_engine()
+    ensure_db_writable()
+    eng = get_engine()
     nome = _safe_str(nome)
-    with engine.begin() as conn:
+    with eng.begin() as conn:
         conn.execute(text("""
             INSERT INTO procedimento_tipos (nome, ativo, ordem)
             VALUES (:nome, :ativo, :ordem)
             ON CONFLICT(nome) DO UPDATE SET ativo=excluded.ativo, ordem=excluded.ordem
         """), {"nome": nome, "ativo": int(ativo), "ordem": int(ordem)})
-        return conn.execute(text("SELECT id FROM procedimento_tipos WHERE nome=:n"), {"n": nome}).scalar_one()
+        row = conn.execute(text("SELECT id FROM procedimento_tipos WHERE nome=:n"), {"n": nome}).fetchone()
+        return int(row[0]) if row else 0
 
 
-def set_procedimento_tipo_status(tid, ativo):
-    engine = get_engine()
-    with engine.begin() as conn:
+def set_procedimento_tipo_status(tid: int, ativo: int) -> None:
+    ensure_db_writable()
+    eng = get_engine()
+    with eng.begin() as conn:
         conn.execute(text("UPDATE procedimento_tipos SET ativo=:a WHERE id=:i"), {"a": int(ativo), "i": int(tid)})
 
 
-def list_cirurgia_situacoes(only_active=True):
-    engine = get_engine()
+def list_cirurgia_situacoes(only_active: bool = True) -> List[Tuple]:
+    eng = get_engine()
     sql = "SELECT id, nome, ativo, ordem FROM cirurgia_situacoes"
     if only_active:
         sql += " WHERE ativo=1"
     sql += " ORDER BY ordem, nome"
-    with engine.connect() as conn:
+    with eng.connect() as conn:
         return conn.execute(text(sql)).fetchall()
 
 
-def upsert_cirurgia_situacao(nome, ativo=1, ordem=1):
+def upsert_cirurgia_situacao(nome: str, ativo: int = 1, ordem: int = 1) -> int:
     ensure_unique_indexes()
-    engine = get_engine()
+    ensure_db_writable()
+    eng = get_engine()
     nome = _safe_str(nome)
-    with engine.begin() as conn:
+    with eng.begin() as conn:
         conn.execute(text("""
             INSERT INTO cirurgia_situacoes (nome, ativo, ordem)
             VALUES (:nome, :ativo, :ordem)
             ON CONFLICT(nome) DO UPDATE SET ativo=excluded.ativo, ordem=excluded.ordem
         """), {"nome": nome, "ativo": int(ativo), "ordem": int(ordem)})
-        return conn.execute(text("SELECT id FROM cirurgia_situacoes WHERE nome=:n"), {"n": nome}).scalar_one()
+        row = conn.execute(text("SELECT id FROM cirurgia_situacoes WHERE nome=:n"), {"n": nome}).fetchone()
+        return int(row[0]) if row else 0
 
 
-def set_cirurgia_situacao_status(sid, ativo):
-    engine = get_engine()
-    with engine.begin() as conn:
+def set_cirurgia_situacao_status(sid: int, ativo: int) -> None:
+    ensure_db_writable()
+    eng = get_engine()
+    with eng.begin() as conn:
         conn.execute(text("UPDATE cirurgia_situacoes SET ativo=:a WHERE id=:i"), {"a": int(ativo), "i": int(sid)})
 
 
@@ -483,6 +566,8 @@ def insert_or_update_cirurgia(payload: Dict[str, Any]) -> int:
     Observação: Aceita Atendimento vazio se Paciente vier preenchido (e vice-versa).
     """
     ensure_unique_indexes()
+    ensure_db_writable()
+
     h = _safe_str(payload.get("Hospital"))
     att = _safe_str(payload.get("Atendimento"), "")
     pac = _safe_str(payload.get("Paciente"), "")
@@ -492,8 +577,8 @@ def insert_or_update_cirurgia(payload: Dict[str, Any]) -> int:
         raise ValueError("Chave mínima inválida para cirurgia.")
 
     now = datetime.now().isoformat(timespec="seconds")
-    engine = get_engine()
-    with engine.begin() as conn:
+    eng = get_engine()
+    with eng.begin() as conn:
         conn.execute(text("""
             INSERT INTO cirurgias (
                 Hospital, Atendimento, Paciente, Prestador, Data_Cirurgia,
@@ -527,13 +612,14 @@ def insert_or_update_cirurgia(payload: Dict[str, Any]) -> int:
             "Obs": _safe_str(payload.get("Observacoes")),
             "created": now, "updated": now
         })
-        return conn.execute(text("""
+        row = conn.execute(text("""
             SELECT id FROM cirurgias
             WHERE Hospital=:h AND Atendimento=:a AND Paciente=:p AND Prestador=:pr AND Data_Cirurgia=:d
-        """), {"h": h, "a": att, "p": pac, "pr": p, "d": d}).scalar_one()
+        """), {"h": h, "a": att, "p": pac, "pr": p, "d": d}).fetchone()
+        return int(row[0]) if row else 0
 
 
-def list_cirurgias(hospital=None, ano_mes=None, prestador=None):
+def list_cirurgias(hospital: Optional[str] = None, ano_mes: Optional[str] = None, prestador: Optional[str] = None) -> List[Tuple]:
     clauses, params = [], {}
     if hospital:
         clauses.append("Hospital=:h")
@@ -554,46 +640,56 @@ def list_cirurgias(hospital=None, ano_mes=None, prestador=None):
         FROM cirurgias {where}
         ORDER BY Data_Cirurgia, Prestador, Atendimento, Paciente
     """
-    engine = get_engine()
-    with engine.connect() as conn:
+    eng = get_engine()
+    with eng.connect() as conn:
         return conn.execute(text(sql), params).fetchall()
 
 
-def delete_cirurgia(cirurgia_id: int):
-    engine = get_engine()
-    with engine.begin() as conn:
-        conn.execute(text("DELETE FROM cirurgias WHERE id=:i"), {"i": int(cirurgia_id)})
+def delete_cirurgia(cirurgia_id: int) -> int:
+    ensure_db_writable()
+    eng = get_engine()
+    with eng.begin() as conn:
+        res = conn.execute(text("DELETE FROM cirurgias WHERE id=:i"), {"i": int(cirurgia_id)})
+        return res.rowcount or 0
 
 
-# --- NOVO: excluir por chave composta (sem precisar do id) ---
-def delete_cirurgia_by_key(hospital: str,
-                           atendimento: str,
-                           paciente: str,
-                           prestador: str,
-                           data_cirurgia: str) -> int:
+def delete_cirurgia_by_key(
+    hospital: str,
+    atendimento: str,
+    paciente: str,
+    prestador: str,
+    data_cirurgia: str
+) -> int:
     """
     Exclui 1 registro de 'cirurgias' usando a chave única composta.
     Retorna o número de linhas afetadas (0 ou 1).
     """
-    engine = get_engine()
-    with engine.begin() as conn:
+    ensure_db_writable()
+    eng = get_engine()
+    with eng.begin() as conn:
         res = conn.execute(text("""
             DELETE FROM cirurgias
             WHERE Hospital=:h AND Atendimento=:a AND Paciente=:p AND Prestador=:pr AND Data_Cirurgia=:d
-        """), {"h": hospital.strip(), "a": atendimento.strip(), "p": paciente.strip(),
-               "pr": prestador.strip(), "d": data_cirurgia.strip()})
+        """), {
+            "h": hospital.strip(), "a": atendimento.strip(), "p": paciente.strip(),
+            "pr": prestador.strip(), "d": data_cirurgia.strip()
+        })
         return res.rowcount or 0
 
 
-def delete_cirurgias_by_filter(hospital: str,
-                               atendimentos: Optional[Sequence[str]] = None,
-                               prestadores: Optional[Sequence[str]] = None,
-                               datas: Optional[Sequence[str]] = None) -> int:
+def delete_cirurgias_by_filter(
+    hospital: str,
+    atendimentos: Optional[Sequence[str]] = None,
+    prestadores: Optional[Sequence[str]] = None,
+    datas: Optional[Sequence[str]] = None
+) -> int:
     """
     Exclui em lote usando filtros (Hospital obrigatório; Atendimento/Prestador/Data opcionais).
     Datas aceitam formato livre, mas devem bater com o que está persistido (ex.: 'dd/MM/yyyy').
     Retorna total de linhas apagadas.
     """
+    ensure_db_writable()
+
     clauses = ["Hospital=:h"]
     params = {"h": hospital.strip()}
 
@@ -615,7 +711,7 @@ def delete_cirurgias_by_filter(hospital: str,
 
     where = " AND ".join(clauses)
     sql = f"DELETE FROM cirurgias WHERE {where}"
-    engine = get_engine()
-    with engine.begin() as conn:
+    eng = get_engine()
+    with eng.begin() as conn:
         res = conn.execute(text(sql), params)
         return res.rowcount or 0
