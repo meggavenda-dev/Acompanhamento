@@ -282,7 +282,7 @@ def _process_file_cached(file_bytes: bytes, file_name: str, prestadores_lista: l
     - Reconstrói um BytesIO com .name para compatibilidade com o processamento.
     """
     bio = BytesIO(file_bytes)
-    # define um .name para libs que tentam inferir formato pelo nome
+    # define um .name para libs que inferem formato pelo nome
     try:
         bio.name = file_name or "upload.bin"
     except Exception:
@@ -905,7 +905,8 @@ with tabs[1]:
                     try_vacuum_safely()
                     st.success(f"{total_apagadas} cirurgia(s) apagada(s) com sucesso.")
 
-                    if GITHUB_SYNC_AVAILABLE AND GITHUB_TOKEN_OK:
+                    # ✅ Correção de sintaxe: 'and' (não 'AND')
+                    if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
                         try:
                             ok, status, msg = safe_upload_with_merge(
                                 owner=GH_OWNER,
@@ -1361,7 +1362,6 @@ with tabs[3]:
         )
     with colE2:
         try:
-            from io import BytesIO
             output = BytesIO()
             with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
                 df_view.to_excel(writer, sheet_name="Tipos", index=False)
