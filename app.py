@@ -572,16 +572,39 @@ with tabs[1]:
         sit_nome2id = {}
         sit_id2nome = {}
 
-    # Avisos se catálogos estiverem vazios
     if not tipo_nome_list:
         st.warning("Nenhum **Tipo de Procedimento** ativo encontrado. Cadastre na aba **📚 Cadastro (Tipos & Situações)** e marque como **Ativo**.")
     if not sit_nome_list:
         st.warning("Nenhuma **Situação da Cirurgia** ativa encontrada. Cadastre na aba **📚 Cadastro (Tipos & Situações)** e marque como **Ativo**.")
 
+    # --- Filtro de Situação (multiselect) ---
+    st.markdown("#### Filtros complementares")
+    col_sit, col_hint = st.columns([2, 2])
+    with col_sit:
+        sit_filter_nomes = st.multiselect(
+            "Filtrar por Situação (se selecionar, ignora Ano/Mês)",
+            options=sit_nome_list,
+            default=[],
+            help="Selecione uma ou mais Situações. Se usar este filtro, o filtro de Ano/Mês será ignorado."
+        )
+    sit_filter_ids = [sit_nome2id[n] for n in sit_filter_nomes if n in sit_nome2id]
+
+    # Se o filtro de Situação estiver ativo, devemos ignorar Ano/Mês
+    ignorar_periodo_por_situacao = len(sit_filter_ids) > 0
+    if ignorar_periodo_por_situacao:
+        st.info("Filtro por Situação **ativo** — o filtro de Ano/Mês foi ignorado.")
+
     # -------- Montar a Lista de Cirurgias com união (Cirurgias + Base) --------
     try:
-        # ✅ APLICA FILTRO DE ANO/MÊS SOBRE CIRURGIAS SALVAS
-        ano_mes_str = f"{int(ano_cad)}-{int(mes_cad):02d}" if usar_periodo else None
+        # ✅ Ignorar Ano/Mês quando houver filtro por Situação
+        if ignorar_periodo_por_situacao:
+            ano_mes_str = None
+            ano_base = None
+            mes_base = None
+        else:
+            ano_mes_str = f"{int(ano_cad)}-{int(mes_cad):02d}" if usar_periodo else None
+            ano_base = int(ano_cad) if usar_periodo else None
+            mes_base = int(mes_cad) if usar_periodo else None
 
         rows_cir = list_cirurgias(hospital=hosp_cad, ano_mes=ano_mes_str, prestador=None)
         df_cir = pd.DataFrame(rows_cir, columns=[
@@ -603,6 +626,10 @@ with tabs[1]:
             prest_set = {p.strip().lower() for p in prestadores_lista_filtro if p.strip()}
             df_cir = df_cir[df_cir["Prestador"].astype(str).str.lower().isin(prest_set)]
 
+        # 🔎 Filtro de situação sobre cirurgias (quando informado)
+        if ignorar_periodo_por_situacao and sit_filter_ids:
+            df_cir = df_cir[df_cir["Situacao_ID"].isin(sit_filter_ids)]
+
         # Labels legíveis
         df_cir["Fonte"] = "Cirurgia"
         df_cir["Tipo (nome)"] = df_cir["Procedimento_Tipo_ID"].map(tipo_id2nome).fillna("")
@@ -616,11 +643,11 @@ with tabs[1]:
         df_cir["_old_pre"] = df_cir["Prestador"].astype(str)
         df_cir["_old_data"] = df_cir["Data_Cirurgia"].astype(str)
 
-        # ✅ Base de candidatos já vem filtrada por Ano/Mês/Prestadores
+        # ✅ Base de candidatos (ignora período se filtro de Situação estiver ativo)
         base_rows = find_registros_para_prefill(
             hosp_cad,
-            ano=int(ano_cad) if usar_periodo else None,
-            mes=int(mes_cad) if usar_periodo else None,
+            ano=ano_base,
+            mes=mes_base,
             prestadores=prestadores_lista_filtro
         )
         df_base = pd.DataFrame(base_rows, columns=["Hospital", "Data", "Atendimento", "Paciente", "Convenio", "Prestador"])
@@ -662,7 +689,7 @@ with tabs[1]:
 
         st.info(f"Cirurgias já salvas: {len(df_cir)} | Candidatos da base: {len(df_base)}")
 
-        if df_base.empty:
+        if df_base.empty and not ignorar_periodo_por_situacao:
             st.warning("Nenhum candidato carregado da base com os filtros atuais.")
             with st.expander("Diagnóstico do filtro", expanded=False):
                 st.markdown("- Verifique o **Hospital** (coincide com Aba 1?).")
