@@ -691,16 +691,19 @@ def _ano_mes_clause_for_cirurgias(ano_mes: Optional[str]) -> Tuple[str, dict]:
     }
 
 
+
 def list_cirurgias(
     hospital: Optional[str] = None,
     ano_mes: Optional[str] = None,
-    prestador: Optional[str] = None
+    prestador: Optional[str] = None,
+    situacoes: Optional[List[int]] = None
 ) -> List[Tuple]:
     """
     Lista cirurgias com filtros opcionais:
       - hospital: exato
       - ano_mes: 'YYYY-MM' (aceita ambas formas ao persistir)
       - prestador: exato (se informado)
+      - situacoes: lista de IDs de situação (filtra por Situacao_ID)
     """
     clauses = []
     params: Dict[str, Any] = {}
@@ -713,18 +716,21 @@ def list_cirurgias(
         clauses.append("Prestador=:p")
         params["p"] = prestador
 
+    if situacoes and len(situacoes) > 0:
+        placeholders = []
+        for i, s in enumerate(situacoes):
+            key = f"s{i}"
+            params[key] = int(s)
+            placeholders.append(f":{key}")
+        clauses.append(f"Situacao_ID IN ({', '.join(placeholders)})")
+
     # Filtro Ano/Mês para Data_Cirurgia
     ano_mes_clause, ano_mes_params = _ano_mes_clause_for_cirurgias(ano_mes)
-    where = " AND ".join(clauses)
-    if where:
-        where = " WHERE " + where
-        if ano_mes_clause:
-            where += ano_mes_clause
-            params.update(ano_mes_params)
-    else:
-        if ano_mes_clause:
-            where = " WHERE 1=1 " + ano_mes_clause
-            params.update(ano_mes_params)
+    if ano_mes_clause:
+        clauses.append(ano_mes_clause[5:] if ano_mes_clause.startswith(" AND ") else ano_mes_clause)
+        params.update(ano_mes_params)
+
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
 
     sql = f"""
         SELECT id, Hospital, Atendimento, Paciente, Prestador, Data_Cirurgia,
@@ -737,7 +743,6 @@ def list_cirurgias(
     eng = get_engine()
     with eng.connect() as conn:
         return conn.execute(text(sql), params).fetchall()
-
 
 def delete_cirurgia(cirurgia_id: int) -> int:
     ensure_db_writable()
