@@ -5,7 +5,11 @@ from datetime import datetime
 import streamlit as st
 import pandas as pd
 
-from db import init_db, upsert_dataframe, read_all, DB_PATH, count_all
+from db import (
+    init_db, upsert_dataframe, read_all, DB_PATH, count_all,
+    vacuum, delete_all_pacientes, delete_all_cirurgias, delete_all_catalogos,
+    hard_reset_local_db, hard_reset_and_upload_to_github
+)
 from processing import process_uploaded_file
 from export import to_formatted_excel_by_hospital
 
@@ -20,34 +24,38 @@ except Exception:
 GH_OWNER = st.secrets.get("GH_OWNER", "seu-usuario-ou-org")
 GH_REPO = st.secrets.get("GH_REPO", "seu-repo")
 GH_BRANCH = st.secrets.get("GH_BRANCH", "main")
-GH_PATH_IN_REPO = st.secrets.get("GH_DB_PATH", "data/exemplo.db")  # deve coincidir com DB_PATH em db.py
+# ✅ alinhar com caminho local (./data/exemplo.db)
+GH_PATH_IN_REPO = st.secrets.get("GH_DB_PATH", "data/exemplo.db")
 GITHUB_TOKEN_OK = bool(st.secrets.get("GITHUB_TOKEN", ""))
+
+# ✅ Forçar download na inicialização (opcional; via st.secrets)
+FORCE_DOWNLOAD_ON_START = bool(st.secrets.get("FORCE_DOWNLOAD_ON_START", False))
 
 st.set_page_config(page_title="Gestão de Pacientes e Cirurgias", layout="wide")
 
 # --- Header ---
 st.title("Gestão de Pacientes e Cirurgias")
-st.caption("Download do banco no GitHub (1x) → Importar/Processar → Revisar/Salvar → Exportar → Cirurgias (com catálogos) → Cadastro/Lista")
+st.caption("Download do banco no GitHub (opcional) → Importar/Processar → Revisar/Salvar → Exportar → Cirurgias (com catálogos) → Cadastro/Lista")
 
-# Baixar DB do GitHub apenas 1x por sessão (ou se não existir localmente)
+# Baixar DB do GitHub (na inicialização), opcionalmente forçado
 if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
-    if ("gh_db_fetched" not in st.session_state) or (not st.session_state["gh_db_fetched"]):
-        if not os.path.exists(DB_PATH):
-            try:
-                downloaded = download_db_from_github(
-                    owner=GH_OWNER,
-                    repo=GH_REPO,
-                    path_in_repo=GH_PATH_IN_REPO,
-                    branch=GH_BRANCH,
-                    local_db_path=DB_PATH
-                )
-                if downloaded:
-                    st.success("Banco baixado do GitHub (primeira carga na sessão).")
-                else:
-                    st.info("Banco não encontrado no GitHub (primeiro uso). Será criado localmente ao salvar.")
-            except Exception as e:
-                st.warning("Não foi possível baixar o banco do GitHub. Verifique token/permissões em st.secrets.")
-                st.exception(e)
+    should_download = FORCE_DOWNLOAD_ON_START or (not os.path.exists(DB_PATH))
+    if should_download and (("gh_db_fetched" not in st.session_state) or (not st.session_state["gh_db_fetched"])):
+        try:
+            downloaded = download_db_from_github(
+                owner=GH_OWNER,
+                repo=GH_REPO,
+                path_in_repo=GH_PATH_IN_REPO,
+                branch=GH_BRANCH,
+                local_db_path=DB_PATH
+            )
+            if downloaded:
+                st.success("Banco baixado do GitHub na inicialização.")
+            else:
+                st.info("Banco não existe no repositório. Será criado localmente ao salvar.")
+        except Exception as e:
+            st.warning("Não foi possível baixar o banco do GitHub na inicialização. Verifique token/permissões em st.secrets.")
+            st.exception(e)
         st.session_state["gh_db_fetched"] = True
 
 # Botão opcional (sidebar) para re-download manual
@@ -107,9 +115,8 @@ with st.sidebar:
     with col_r1:
         if st.button("Apagar **PACIENTES** (tabela base)", type="secondary", disabled=not can_execute):
             try:
-                from db import delete_all_pacientes, vacuum
                 apagados = delete_all_pacientes()
-                vacuum()
+                vacuum()  # autocommit
                 st.success(f"✅ {apagados} paciente(s) apagado(s) do banco.")
                 _sync_after_reset(f"Reset: apaga {apagados} pacientes")
                 st.rerun()
@@ -120,8 +127,7 @@ with st.sidebar:
     with col_r2:
         if st.button("Apagar **CIRURGIAS**", type="secondary", disabled=not can_execute):
             try:
-                from db import delete_all_cirurgias, vacuum
-                apagadas = delete_all_cirurgias()  # retorna quantas foram removidas
+                apagadas = delete_all_cirurgias()
                 vacuum()
                 st.session_state.pop("editor_lista_cirurgias_union", None)  # limpa cache do grid
                 st.success(f"✅ {apagadas} cirurgia(s) apagada(s) do banco.")
@@ -135,7 +141,6 @@ with st.sidebar:
     with col_r3:
         if st.button("Apagar **CATÁLOGOS** (Tipos/Situações)", type="secondary", disabled=not can_execute):
             try:
-                from db import delete_all_catalogos, vacuum
                 apagados = delete_all_catalogos()
                 vacuum()
                 st.success(f"✅ {apagados} registro(s) apagado(s) dos catálogos.")
@@ -148,11 +153,27 @@ with st.sidebar:
     with col_r4:
         if st.button("🗑️ **RESET TOTAL** (apaga arquivo .db)", type="primary", disabled=not can_execute):
             try:
-                from db import dispose_engine, reset_db_file
-                dispose_engine()
-                reset_db_file()
-                st.success("Banco recriado vazio.")
-                _sync_after_reset("Reset total: recria .db vazio")
+                if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
+                    def _uploader(commit_msg: str):
+                        return upload_db_to_github(
+                            owner=GH_OWNER,
+                            repo=GH_REPO,
+                            path_in_repo=GH_PATH_IN_REPO,
+                            branch=GH_BRANCH,
+                            local_db_path=DB_PATH,
+                            commit_message=commit_msg
+                        )
+                    ok = hard_reset_and_upload_to_github(_uploader)
+                    if ok:
+                        st.success("Banco recriado vazio e sincronizado com GitHub.")
+                    else:
+                        st.warning("Banco recriado vazio, mas a sincronização com GitHub falhou.")
+                else:
+                    hard_reset_local_db()
+                    st.success("Banco recriado vazio (sem sync).")
+
+                # Marca que já tratamos o estado local — evita re-download automático indevido
+                st.session_state["gh_db_fetched"] = True
                 st.rerun()
             except Exception as e:
                 st.error("Falha no reset total.")
@@ -160,6 +181,12 @@ with st.sidebar:
 
 # Inicializa DB
 init_db()
+
+# Diagnóstico rápido do arquivo .db
+with st.expander("🔎 Diagnóstico do arquivo .db (local)", expanded=False):
+    exists = os.path.exists(DB_PATH)
+    size = os.path.getsize(DB_PATH) if exists else 0
+    st.caption(f"Caminho: `{DB_PATH}` | Existe: {exists} | Tamanho: {size} bytes | Linhas (pacientes): {count_all()}")
 
 # Lista única de hospitais (ajuste conforme necessário)
 HOSPITAL_OPCOES = [
@@ -175,7 +202,6 @@ tabs = st.tabs([
     "📚 Cadastro (Tipos & Situações)",
     "📄 Tipos (Lista)"
 ])
-
 
 # ====================================================================================
 # 📥 Aba 1: Importação & Pacientes
@@ -311,7 +337,6 @@ with tabs[0]:
                 st.exception(e)
 
         st.markdown("#### Exportar Excel (multi-aba por Hospital)")
-        # ✅ Garantir DataFrame na exportação
         df_for_export = pd.DataFrame(st.session_state.df_final)
         excel_bytes = to_formatted_excel_by_hospital(df_for_export)
         st.download_button(
@@ -608,9 +633,6 @@ with tabs[1]:
                             st.error("Falha ao sincronizar com GitHub.")
                             st.exception(e)
 
-                    # (Opcional) Recarregar para refletir após salvar:
-                    # st.rerun()
-
                 except Exception as e:
                     st.error("Falha ao salvar alterações da lista.")
                     st.exception(e)
@@ -620,7 +642,6 @@ with tabs[1]:
                 try:
                     from export import to_formatted_excel_cirurgias
                     export_df = edited_df.drop(columns=["Tipo (nome)", "Situação (nome)"], errors="ignore")
-                    # ✅ Garantir DataFrame na exportação
                     export_df = pd.DataFrame(export_df)
                     excel_bytes = to_formatted_excel_cirurgias(export_df)
                     st.download_button(
