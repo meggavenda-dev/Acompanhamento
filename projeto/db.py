@@ -10,6 +10,7 @@ Alterações principais:
 - Funções de reset robustas (hard_reset_local_db e hard_reset_and_upload_to_github).
 - Exclusão por chave composta e por filtros (delete_cirurgia_by_key, delete_cirurgias_by_filter).
 - Mantém UNIQUE constraints e índices únicos idempotentes.
+- ✅ (Novo) upsert_paciente_single e delete_paciente_by_key (suporte a “mover” registros na base).
 """
 
 from __future__ import annotations
@@ -313,7 +314,7 @@ def delete_all_cirurgias() -> int:
     with eng.begin() as conn:
         total = conn.execute(text("SELECT COUNT(*) FROM cirurgias")).scalar_one()
         conn.execute(text("DELETE FROM cirurgias"))
-    return int(total or 0)
+        return int(total or 0)
 
 
 # =============================================================================
@@ -383,6 +384,54 @@ def upsert_dataframe(df: pd.DataFrame) -> Tuple[int, int]:
             })
 
     return (len(df_valid), ignoradas)
+
+
+def upsert_paciente_single(row: Dict[str, Any]) -> Tuple[int, int]:
+    """
+    UPSERT de 1 registro em pacientes_unicos_por_dia_prestador.
+    Espera chaves: Hospital, Data (dd/MM/yyyy ou YYYY-MM-DD), Prestador
+    e pelo menos um entre Atendimento/Paciente.
+
+    Retorna (1, 0) se salvo; (0, 1) se ignorado por chave incompleta.
+    """
+    df = pd.DataFrame([row])
+
+    # Deriva Ano/Mes/Dia de Data
+    try:
+        dt = pd.to_datetime(df["Data"], dayfirst=True, errors="coerce")
+        df["Ano"] = dt.dt.year
+        df["Mes"] = dt.dt.month
+        df["Dia"] = dt.dt.day
+    except Exception:
+        df["Ano"] = None
+        df["Mes"] = None
+        df["Dia"] = None
+
+    return upsert_dataframe(df)
+
+
+def delete_paciente_by_key(
+    hospital: str,
+    atendimento: str,
+    paciente: str,
+    prestador: str,
+    data: str
+) -> int:
+    """
+    Exclui 1 registro da base 'pacientes_unicos_por_dia_prestador' usando a chave única composta.
+    Retorna o número de linhas afetadas (0 ou 1).
+    """
+    ensure_db_writable()
+    eng = get_engine()
+    with eng.begin() as conn:
+        res = conn.execute(text("""
+            DELETE FROM pacientes_unicos_por_dia_prestador
+            WHERE Hospital=:h AND Atendimento=:a AND Paciente=:p AND Prestador=:pr AND Data=:d
+        """), {
+            "h": hospital.strip(), "a": atendimento.strip(), "p": paciente.strip(),
+            "pr": prestador.strip(), "d": data.strip()
+        })
+        return res.rowcount or 0
 
 
 def read_all() -> List[Tuple]:
