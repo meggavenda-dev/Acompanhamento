@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 import os
 from datetime import datetime
+from io import BytesIO
 import streamlit as st
 import pandas as pd
 
@@ -40,21 +41,37 @@ GH_BRANCH = st.secrets.get("GH_BRANCH", "main")
 GH_PATH_IN_REPO = st.secrets.get("GH_DB_PATH", "data/exemplo.db")
 GITHUB_TOKEN_OK = bool(st.secrets.get("GITHUB_TOKEN", ""))
 
+# ---- Versão de cache do app (mude quando alterar a lógica de processamento) ----
+APP_CACHE_VERSION = "v1.0.0"
+
 st.set_page_config(page_title="Gestão de Pacientes e Cirurgias", layout="wide")
 
 # --- Header ---
 st.title("Gestão de Pacientes e Cirurgias")
-st.caption("Download do banco no GitHub (opcional) → Importar/Processar → Revisar/Salvar (apenas selecionados) → Exportar → Cirurgias → Cadastro/Lista")
+st.caption("Download do banco no GitHub (opcional) → Importar/Processar (cache com TTL) → Revisar/Selecionar → Salvar → Exportar → Cirurgias → Cadastro/Lista")
 
 # ---------------------------
-# Helper: VACUUM seguro
+# Boot cleanup do cache de dados (uma vez por sessão)
+# ---------------------------
+def _boot_session_cleanup():
+    # Limpa apenas cache de dados (barato) — evita staleness entre execuções
+    st.cache_data.clear()
+
+if not st.session_state.get("_boot_cleanup_done"):
+    _boot_session_cleanup()
+    st.session_state["_boot_cleanup_done"] = True
+
+# ---------------------------
+# Helper: VACUUM seguro + limpeza de cache pós-manutenção
 # ---------------------------
 def try_vacuum_safely():
-    """Tenta executar VACUUM; se DB estiver read-only, não interrompe a UI."""
+    """Tenta executar VACUUM; se DB estiver read-only, não interrompe a UI. Limpa cache de dados após sucesso."""
     try:
         ensure_db_writable()
         vacuum()
-        st.caption("VACUUM executado com sucesso.")
+        # Dados/processamentos cacheados podem ter ficado desatualizados
+        st.cache_data.clear()
+        st.caption("VACUUM executado e cache de dados limpo.")
     except Exception as e:
         msg = str(e).lower()
         if "readonly" in msg or "read-only" in msg:
@@ -90,6 +107,8 @@ if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
                 return_sha=True
             )
             if downloaded:
+                # Após baixar novo .db, dados cacheados ficam inválidos
+                st.cache_data.clear()
                 st.session_state["gh_sha"] = remote_sha
                 st.session_state["gh_db_fetched"] = True
                 st.success("Banco baixado do GitHub na inicialização (bootstrap).")
@@ -118,6 +137,8 @@ with st.sidebar:
                     return_sha=True
                 )
                 if downloaded:
+                    # Invalida caches de dados pois o .db mudou
+                    st.cache_data.clear()
                     st.success("Banco baixado do GitHub (manual).")
                     st.session_state["gh_sha"] = remote_sha
                     st.session_state["gh_db_fetched"] = True
@@ -186,6 +207,8 @@ with st.sidebar:
             try:
                 ensure_db_writable()
                 apagados = delete_all_pacientes()
+                # Limpa cache de dados porque base mudou
+                st.cache_data.clear()
                 try_vacuum_safely()
                 st.success(f"✅ {apagados} paciente(s) apagado(s) do banco.")
                 _sync_after_reset(f"Reset: apaga {apagados} pacientes")
@@ -199,6 +222,8 @@ with st.sidebar:
             try:
                 ensure_db_writable()
                 apagadas = delete_all_cirurgias()
+                # Limpa cache de dados porque base mudou
+                st.cache_data.clear()
                 try_vacuum_safely()
                 st.session_state.pop("editor_lista_cirurgias_union", None)  # limpa cache do grid
                 st.success(f"✅ {apagadas} cirurgia(s) apagada(s) do banco.")
@@ -214,6 +239,8 @@ with st.sidebar:
             try:
                 ensure_db_writable()
                 apagados = delete_all_catalogos()
+                # Limpa cache de dados porque catálogos mudaram
+                st.cache_data.clear()
                 try_vacuum_safely()
                 st.success(f"✅ {apagados} registro(s) apagado(s) dos catálogos.")
                 _sync_after_reset(f"Reset: apaga {apagados} catálogos")
@@ -226,6 +253,8 @@ with st.sidebar:
         if st.button("🗑️ **RESET TOTAL** (apaga arquivo .db)", type="primary", disabled=not can_execute):
             try:
                 hard_reset_local_db()
+                # DB recriado → limpe cache de dados
+                st.cache_data.clear()
                 st.success("Banco recriado vazio (local).")
 
                 # Sincroniza com remoto (sobrescreve)
@@ -240,6 +269,26 @@ with st.sidebar:
 
 # Inicializa DB (cria tabelas/índices se não existirem)
 init_db()
+
+# -----------------------------------------------------------------
+# Cache de dados (com TTL + versão) para processamento de arquivo
+# -----------------------------------------------------------------
+@st.cache_data(ttl=900, show_spinner=False)
+def _process_file_cached(file_bytes: bytes, file_name: str, prestadores_lista: list, hospital: str,
+                         upload_id: str, app_cache_version: str) -> pd.DataFrame:
+    """
+    Wrapper cacheado para o processamento:
+    - Usa bytes do arquivo (estável) + upload_id + APP_CACHE_VERSION como chave.
+    - Reconstrói um BytesIO com .name para compatibilidade com o processamento.
+    """
+    bio = BytesIO(file_bytes)
+    # define um .name para libs que tentam inferir formato pelo nome
+    try:
+        bio.name = file_name or "upload.bin"
+    except Exception:
+        pass
+    df = process_uploaded_file(bio, prestadores_lista, hospital)
+    return pd.DataFrame(df) if df is not None else pd.DataFrame()
 
 # Diagnóstico rápido do arquivo .db
 with st.expander("🔎 Diagnóstico do arquivo .db (local)", expanded=False):
@@ -267,7 +316,7 @@ tabs = st.tabs([
 # ====================================================================================
 with tabs[0]:
     st.subheader("Pacientes únicos por data, prestador e hospital")
-    st.caption("Upload → herança/filtragem/deduplicação → Hospital → editar Paciente → selecionar → salvar apenas selecionados → exportar → sync GitHub")
+    st.caption("Upload → processamento cacheado (TTL) → Revisar/Editar/Selecionar → Salvar apenas selecionados → Exportar → sync GitHub")
 
     st.markdown("#### Prestadores alvo")
     prestadores_default = ["JOSE.ADORNO", "CASSIO CESAR", "FERNANDO AND", "SIMAO.MATOS"]
@@ -332,14 +381,26 @@ with tabs[0]:
 
     if uploaded_file is not None:
         current_upload_id = _make_upload_id(uploaded_file, selected_hospital)
+        # Se mudou o arquivo/hospital, limpe cache de dados — novo contexto
         if st.session_state.last_upload_id != current_upload_id:
+            st.cache_data.clear()  # invalida processamentos anteriores
             st.session_state.df_final = None
             st.session_state.editor_key = f"editor_pacientes_{current_upload_id}"
             st.session_state.last_upload_id = current_upload_id
 
-        with st.spinner("Processando arquivo..."):
+        with st.spinner("Processando arquivo (cacheado com TTL)..."):
             try:
-                df_final = process_uploaded_file(uploaded_file, prestadores_lista, selected_hospital.strip())
+                # Constrói a chave cacheável e lê bytes do arquivo
+                file_name = getattr(uploaded_file, "name", "upload.bin")
+                file_bytes = uploaded_file.getvalue()
+                df_final = _process_file_cached(
+                    file_bytes=file_bytes,
+                    file_name=file_name,
+                    prestadores_lista=prestadores_lista,
+                    hospital=selected_hospital.strip(),
+                    upload_id=current_upload_id,
+                    app_cache_version=APP_CACHE_VERSION
+                )
                 if df_final is None or len(df_final) == 0:
                     st.warning("Nenhuma linha após processamento. Verifique a lista de prestadores e o conteúdo do arquivo.")
                     st.session_state.df_final = None
@@ -362,7 +423,6 @@ with tabs[0]:
         if "Selecionar" not in df_to_edit.columns:
             df_to_edit["Selecionar"] = default_select
         else:
-            # Se o usuário limpou tabela e reprocessou, reorienta para o default atual
             df_to_edit["Selecionar"] = df_to_edit["Selecionar"].fillna(default_select).astype(bool)
 
         edited_df = st.data_editor(
@@ -398,7 +458,9 @@ with tabs[0]:
                     st.warning("Nenhum paciente selecionado para importação.")
                 else:
                     ensure_db_writable()
-                    salvos, ignoradas = upsert_dataframe(df_selecionados)
+                    salvos, ignoradas = upsert_dataframe(df_selecionados.drop(columns=["Selecionar"], errors="ignore"))
+                    # Base mudou → limpe cache de dados
+                    st.cache_data.clear()
                     total = count_all()
                     st.success(f"Importação concluída: {salvos} salvos, {ignoradas} ignorados (chave incompleta). Total no banco: {total}")
 
@@ -423,7 +485,7 @@ with tabs[0]:
                             st.error("Falha ao sincronizar com GitHub.")
                             st.exception(e)
 
-                    # após salvar, mantém tabela para nova seleção/edição (não limpa)
+                    # mantém tabela para nova seleção/edição
                     st.session_state.editor_key = "editor_pacientes_after_save"
 
             except PermissionError as pe:
@@ -433,7 +495,7 @@ with tabs[0]:
                 st.exception(e)
 
         st.markdown("#### Exportar Excel (multi-aba por Hospital)")
-        # Exporta o DF atual (inclui não selecionados, pois é revisão/diagnóstico)
+        # Exporta o DF atual (inclui não selecionados, para revisão)
         df_for_export = pd.DataFrame(edited_df.drop(columns=["Selecionar"], errors="ignore"))
         excel_bytes = to_formatted_excel_by_hospital(df_for_export)
         st.download_button(
@@ -538,7 +600,7 @@ with tabs[1]:
     if not tipo_nome_list:
         st.warning("Nenhum **Tipo de Procedimento** ativo encontrado. Cadastre na aba **📚 Cadastro (Tipos & Situações)** e marque como **Ativo**.")
     if not sit_nome_list:
-        st.warning("Nenhuma **Situação da Cirurgia** ativa encontrado. Cadastre na aba **📚 Cadastro (Tipos & Situações)** e marque como **Ativo**.")
+        st.warning("Nenhuma **Situação da Cirurgia** ativa encontrada. Cadastre na aba **📚 Cadastro (Tipos & Situações)** e marque como **Ativo**.")
 
     # -------- Montar a Lista de Cirurgias com união (Cirurgias + Base) --------
     try:
@@ -594,8 +656,8 @@ with tabs[1]:
             "Prestador": df_base["Prestador"],
             "Data_Cirurgia": df_base["Data"],
             "Convenio": df_base["Convenio"],
-            "Procedimento_Tipo_ID": [None]*len(df_base),  # será preenchido ao salvar
-            "Situacao_ID": [None]*len(df_base),           # idem
+            "Procedimento_Tipo_ID": [None]*len(df_base),
+            "Situacao_ID": [None]*len(df_base),
             "Guia_AMHPTISS": ["" for _ in range(len(df_base))],
             "Guia_AMHPTISS_Complemento": ["" for _ in range(len(df_base))],
             "Fatura": ["" for _ in range(len(df_base))],
@@ -603,8 +665,8 @@ with tabs[1]:
             "created_at": [None]*len(df_base),
             "updated_at": [None]*len(df_base),
             "Fonte": ["Base"]*len(df_base),
-            "Tipo (nome)": ["" for _ in range(len(df_base))],  # edição por nome
-            "Situação (nome)": ["" for _ in range(len(df_base))],  # edição por nome
+            "Tipo (nome)": ["" for _ in range(len(df_base))],
+            "Situação (nome)": ["" for _ in range(len(df_base))],
         })
 
         # União preferindo registros já existentes (evita duplicar mesma chave)
@@ -687,6 +749,9 @@ with tabs[1]:
                             num_skip += 1
                     st.success(f"UPSERT concluído. {num_ok} linha(s) salvas; {num_skip} ignorada(s).")
 
+                    # Base mudou → limpe cache de dados
+                    st.cache_data.clear()
+
                     if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
                         try:
                             ok, status, msg = safe_upload_with_merge(
@@ -736,6 +801,8 @@ with tabs[1]:
                 try:
                     ensure_db_writable()
                     delete_cirurgia(int(del_id))
+                    # Base mudou → limpe cache de dados
+                    st.cache_data.clear()
                     st.success(f"Cirurgia id={int(del_id)} excluída.")
 
                     if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
@@ -779,6 +846,8 @@ with tabs[1]:
                 try:
                     ensure_db_writable()
                     removed = delete_cirurgia_by_key(key_h, key_att, key_pac, key_pre, key_dt)
+                    # Base mudou → limpe cache de dados
+                    st.cache_data.clear()
                     try_vacuum_safely()
                     if removed:
                         st.success("Registro apagado com sucesso.")
@@ -831,10 +900,12 @@ with tabs[1]:
                         prestadores=_to_list(prests_raw),
                         datas=_to_list(datas_raw)
                     )
+                    # Base mudou → limpe cache de dados
+                    st.cache_data.clear()
                     try_vacuum_safely()
                     st.success(f"{total_apagadas} cirurgia(s) apagada(s) com sucesso.")
 
-                    if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
+                    if GITHUB_SYNC_AVAILABLE AND GITHUB_TOKEN_OK:
                         try:
                             ok, status, msg = safe_upload_with_merge(
                                 owner=GH_OWNER,
@@ -941,6 +1012,8 @@ with tabs[2]:
 
             ensure_db_writable()
             tid = upsert_procedimento_tipo(tipo_nome, int(tipo_ativo), int(tipo_ordem))
+            # Catálogo mudou → limpe cache de dados
+            st.cache_data.clear()
             st.success(f"Tipo salvo (id={tid}).")
 
             tipos_all2 = list_procedimento_tipos(only_active=False)
@@ -1004,6 +1077,9 @@ with tabs[2]:
                     except Exception:
                         num_skip += 1
 
+                # Catálogo mudou → limpe cache de dados
+                st.cache_data.clear()
+
                 tipos_all3 = list_procedimento_tipos(only_active=False)
                 df3 = pd.DataFrame(tipos_all3, columns=["id", "nome", "ativo", "ordem"]) if tipos_all3 else pd.DataFrame(columns=["id", "nome", "ativo", "ordem"])
                 st.session_state["df_tipos_cached"] = df3
@@ -1056,6 +1132,9 @@ with tabs[2]:
                         ensure_db_writable()
                         for _, r in df_tipos.iterrows():
                             set_procedimento_tipo_status(int(r["id"]), int(r["ativo"]))
+                        # Catálogo mudou → limpe cache de dados
+                        st.cache_data.clear()
+
                         st.success("Tipos atualizados.")
 
                         tipos_all3 = list_procedimento_tipos(only_active=False)
@@ -1136,6 +1215,8 @@ with tabs[2]:
 
             ensure_db_writable()
             sid = upsert_cirurgia_situacao(sit_nome, int(sit_ativo), int(sit_ordem))
+            # Catálogo mudou → limpe cache de dados
+            st.cache_data.clear()
             st.success(f"Situação salva (id={sid}).")
 
             sits_all2 = list_cirurgia_situacoes(only_active=False)
@@ -1198,6 +1279,9 @@ with tabs[2]:
                         ensure_db_writable()
                         for _, r in df_sits.iterrows():
                             set_cirurgia_situacao_status(int(r["id"]), int(r["ativo"]))
+                        # Catálogo mudou → limpe cache de dados
+                        st.cache_data.clear()
+
                         st.success("Situações atualizadas.")
 
                         sits_all3 = list_cirurgia_situacoes(only_active=False)
