@@ -481,6 +481,111 @@ with tabs[0]:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
+    # ==========================================================
+    # ➕ Cadastro manual de paciente (mesmos campos da importação)
+    # ==========================================================
+    with st.expander("➕ Cadastro manual de paciente (campos iguais à importação)", expanded=False):
+        st.caption("Preencha os dados e clique em **Salvar**. É obrigatório informar: Hospital, Data, Prestador e (Atendimento **ou** Paciente).")
+
+        colM1, colM2, colM3 = st.columns([1, 1, 1])
+        with colM1:
+            cad_hospital = st.selectbox("Hospital", options=HOSPITAL_OPCOES, index=0, key="cad_hosp_manual")
+        with colM2:
+            cad_data_date = st.date_input("Data (dia/mês/ano)", value=datetime.today().date(), key="cad_data_manual")
+            cad_data_str = cad_data_date.strftime("%d/%m/%Y")  # dd/MM/yyyy
+        with colM3:
+            cad_prestador = st.text_input("Prestador", value="", key="cad_prest_manual", placeholder="Ex.: JOSE.ADORNO")
+
+        colM4, colM5, colM6 = st.columns([1, 1, 1])
+        with colM4:
+            cad_atendimento = st.text_input("Atendimento", value="", key="cad_att_manual", placeholder="Código do atendimento (opcional se informar Paciente)")
+        with colM5:
+            cad_paciente = st.text_input("Paciente", value="", key="cad_pac_manual", placeholder="Nome do paciente (opcional se informar Atendimento)")
+        with colM6:
+            cad_convenio = st.text_input("Convênio", value="", key="cad_conv_manual", placeholder="Ex.: Particular, Unimed...")
+
+        colM7, colM8 = st.columns([1, 1])
+        with colM7:
+            cad_aviso = st.text_input("Aviso", value="", key="cad_aviso_manual", placeholder="Observação breve (opcional)")
+        with colM8:
+            cad_quarto = st.text_input("Quarto", value="", key="cad_quarto_manual", placeholder="Ex.: 301-B (opcional)")
+
+        salvar_cad_manual = st.button("💾 Salvar paciente (manual)")
+
+        if salvar_cad_manual:
+            try:
+                # Validações mínimas
+                errors = []
+                if not cad_hospital:
+                    errors.append("Hospital é obrigatório.")
+                if not cad_data_str:
+                    errors.append("Data é obrigatória.")
+                if not cad_prestador.strip():
+                    errors.append("Prestador é obrigatório.")
+                if (not cad_atendimento.strip()) and (not cad_paciente.strip()):
+                    errors.append("Informe **Atendimento** ou **Paciente** (pelo menos um).")
+
+                if errors:
+                    for e in errors:
+                        st.error(e)
+                else:
+                    ensure_db_writable()
+                    base_row = {
+                        "Hospital": cad_hospital.strip(),
+                        "Data": cad_data_str.strip(),
+                        "Atendimento": cad_atendimento.strip(),
+                        "Paciente": cad_paciente.strip(),
+                        "Prestador": cad_prestador.strip(),
+                        "Convenio": cad_convenio.strip(),
+                        "Aviso": cad_aviso.strip(),
+                        "Quarto": cad_quarto.strip(),
+                    }
+                    salvos, ignoradas = upsert_paciente_single(base_row)
+
+                    if salvos == 1 and ignoradas == 0:
+                        st.success("Paciente cadastrado/atualizado com sucesso na base.")
+                    elif ignoradas == 1:
+                        st.warning("Cadastro ignorado: chave mínima incompleta (Atendimento e Paciente vazios).")
+                    else:
+                        st.info(f"Ação concluída. (salvos={salvos}, ignoradas={ignoradas})")
+
+                    # Limpa cache de dados e manutenção
+                    st.cache_data.clear()
+                    try_vacuum_safely()
+
+                    # Sincroniza com GitHub
+                    if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
+                        try:
+                            ok, status, msg = safe_upload_with_merge(
+                                owner=GH_OWNER,
+                                repo=GH_REPO,
+                                path_in_repo=GH_PATH_IN_REPO,
+                                branch=GH_BRANCH,
+                                local_db_path=DB_PATH,
+                                commit_message="Cadastro manual de paciente (Aba Importação)",
+                                prev_sha=st.session_state.get("gh_sha"),
+                                _return_details=True
+                            )
+                            if ok:
+                                new_sha = get_remote_sha(GH_OWNER, GH_REPO, GH_PATH_IN_REPO, GH_BRANCH)
+                                if new_sha:
+                                    st.session_state["gh_sha"] = new_sha
+                                st.success("Sincronização automática com GitHub concluída.")
+                            else:
+                                st.error(f"Falha ao sincronizar com GitHub (status={status}). {msg}")
+                        except Exception as e:
+                            st.error("Falha ao sincronizar com GitHub.")
+                            st.exception(e)
+
+                    # Recarrega a aba para refletir o novo cadastro
+                    st.rerun()
+
+            except PermissionError as pe:
+                st.error(f"Diretório/arquivo do DB não é gravável. Ajuste 'DB_DIR' ou permissões. Detalhe: {pe}")
+            except Exception as e:
+                st.error("Falha ao salvar cadastro manual.")
+                st.exception(e)
+
     st.divider()
     st.markdown("#### Conteúdo atual do banco (exemplo.db)")
     rows = read_all()
@@ -1432,8 +1537,9 @@ with tabs[3]:
             with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
                 df_view.to_excel(writer, sheet_name="Tipos", index=False)
                 wb = writer.book
-                ws = writer.sheets["Tipos"]
+                ws = writer.sheets("Tipos") if hasattr(writer, "sheets") else writer.sheets["Tipos"]
                 header_fmt = wb.add_format({"bold": True, "bg_color": "#DCE6F1", "border": 1})
+                # Segurança: garante cabeçalho com formato
                 for col_num, value in enumerate(df_view.columns):
                     ws.write(0, col_num, value, header_fmt)
                 last_row = max(len(df_view), 1)
