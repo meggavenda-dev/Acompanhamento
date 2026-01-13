@@ -242,7 +242,7 @@ def vacuum() -> None:
                 conn.execute("PRAGMA optimize")
             except Exception:
                 pass
-    except sqlite3.OperationalError as e:
+    except sqlite3.OperationalError:
         # Propaga; o app decide ignorar se for read-only
         raise
 
