@@ -1386,7 +1386,7 @@ with tabs[3]:
     page = st.number_input("Página", min_value=1, max_value=max_page, value=1, step=1)
     start, end = (page - 1) * per_page, (page - 1) * per_page + per_page
     df_page = df_view.iloc[start:end].copy()
-    st.caption(f"Exibindo {len[df_page]} de {total_rows} registro(s) — página {page}/{max_page}")
+    st.caption(f"Exibindo {len(df_page)} de {total_rows} registro(s) — página {page}/{max_page}")
     st.dataframe(df_page, use_container_width=True)
 
     st.markdown("#### Exportar")
