@@ -7,6 +7,7 @@ Alterações principais:
 - Usa caminho estável (./data/exemplo.db) em vez de diretório temporário.
 - VACUUM com autocommit (fora de transação).
 - Funções de reset robustas (hard_reset_local_db e hard_reset_and_upload_to_github).
+- Exclusão por chave composta e por filtros (delete_cirurgia_by_key, delete_cirurgias_by_filter).
 - Mantém UNIQUE constraints e índices únicos idempotentes.
 """
 
@@ -562,3 +563,59 @@ def delete_cirurgia(cirurgia_id: int):
     engine = get_engine()
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM cirurgias WHERE id=:i"), {"i": int(cirurgia_id)})
+
+
+# --- NOVO: excluir por chave composta (sem precisar do id) ---
+def delete_cirurgia_by_key(hospital: str,
+                           atendimento: str,
+                           paciente: str,
+                           prestador: str,
+                           data_cirurgia: str) -> int:
+    """
+    Exclui 1 registro de 'cirurgias' usando a chave única composta.
+    Retorna o número de linhas afetadas (0 ou 1).
+    """
+    engine = get_engine()
+    with engine.begin() as conn:
+        res = conn.execute(text("""
+            DELETE FROM cirurgias
+            WHERE Hospital=:h AND Atendimento=:a AND Paciente=:p AND Prestador=:pr AND Data_Cirurgia=:d
+        """), {"h": hospital.strip(), "a": atendimento.strip(), "p": paciente.strip(),
+               "pr": prestador.strip(), "d": data_cirurgia.strip()})
+        return res.rowcount or 0
+
+
+def delete_cirurgias_by_filter(hospital: str,
+                               atendimentos: Optional[Sequence[str]] = None,
+                               prestadores: Optional[Sequence[str]] = None,
+                               datas: Optional[Sequence[str]] = None) -> int:
+    """
+    Exclui em lote usando filtros (Hospital obrigatório; Atendimento/Prestador/Data opcionais).
+    Datas aceitam formato livre, mas devem bater com o que está persistido (ex.: 'dd/MM/yyyy').
+    Retorna total de linhas apagadas.
+    """
+    clauses = ["Hospital=:h"]
+    params = {"h": hospital.strip()}
+
+    def _add_in(field: str, values: Optional[Sequence[str]], key_prefix: str):
+        if values:
+            vals = [str(v).strip() for v in values if str(v).strip()]
+            if vals:
+                phs, dct = [], {}
+                for i, val in enumerate(vals):
+                    k = f"{key_prefix}{i}"
+                    dct[k] = val
+                    phs.append(f":{k}")
+                clauses.append(f"{field} IN ({', '.join(phs)})")
+                params.update(dct)
+
+    _add_in("Atendimento", atendimentos, "att")
+    _add_in("Prestador", prestadores, "pr")
+    _add_in("Data_Cirurgia", datas, "dt")
+
+    where = " AND ".join(clauses)
+    sql = f"DELETE FROM cirurgias WHERE {where}"
+    engine = get_engine()
+    with engine.begin() as conn:
+        res = conn.execute(text(sql), params)
+        return res.rowcount or 0
