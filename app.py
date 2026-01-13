@@ -8,27 +8,27 @@ import pandas as pd
 from db import (
     init_db, upsert_dataframe, read_all, DB_PATH, count_all,
     vacuum, delete_all_pacientes, delete_all_cirurgias, delete_all_catalogos,
-    hard_reset_local_db, hard_reset_and_upload_to_github
+    hard_reset_local_db
 )
 from processing import process_uploaded_file
 from export import to_formatted_excel_by_hospital
 
 # --- GitHub sync (baixar/subir o .db) ---
 try:
-    from github_sync import download_db_from_github, upload_db_to_github
+    from github_sync import download_db_from_github, safe_upload_with_merge, upload_db_to_github
     GITHUB_SYNC_AVAILABLE = True
 except Exception:
     GITHUB_SYNC_AVAILABLE = False
 
 # ---- Config GitHub (usa st.secrets; sem UI) ----
 GH_OWNER = st.secrets.get("GH_OWNER", "seu-usuario-ou-org")
-GH_REPO = st.secrets.get("GH_REPO", "seu-repo")
+GH_REPO  = st.secrets.get("GH_REPO", "seu-repo")
 GH_BRANCH = st.secrets.get("GH_BRANCH", "main")
 # ✅ alinhar com caminho local (./data/exemplo.db)
 GH_PATH_IN_REPO = st.secrets.get("GH_DB_PATH", "data/exemplo.db")
 GITHUB_TOKEN_OK = bool(st.secrets.get("GITHUB_TOKEN", ""))
 
-# ✅ Forçar download na inicialização (opcional; via st.secrets)
+# (Mantido por compatibilidade, mas NÃO usamos para não sobrescrever local em startup)
 FORCE_DOWNLOAD_ON_START = bool(st.secrets.get("FORCE_DOWNLOAD_ON_START", False))
 
 st.set_page_config(page_title="Gestão de Pacientes e Cirurgias", layout="wide")
@@ -37,24 +37,28 @@ st.set_page_config(page_title="Gestão de Pacientes e Cirurgias", layout="wide")
 st.title("Gestão de Pacientes e Cirurgias")
 st.caption("Download do banco no GitHub (opcional) → Importar/Processar → Revisar/Salvar → Exportar → Cirurgias (com catálogos) → Cadastro/Lista")
 
-# Baixar DB do GitHub (na inicialização), opcionalmente forçado
+# =========================
+# Startup: baixar .db somente se NÃO existir localmente
+# =========================
 if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
-    should_download = FORCE_DOWNLOAD_ON_START or (not os.path.exists(DB_PATH))
-    if should_download and (("gh_db_fetched" not in st.session_state) or (not st.session_state["gh_db_fetched"])):
+    local_exists = os.path.exists(DB_PATH)
+    if (not local_exists) and (not st.session_state.get("gh_db_fetched")):
         try:
-            downloaded = download_db_from_github(
+            downloaded, remote_sha = download_db_from_github(
                 owner=GH_OWNER,
                 repo=GH_REPO,
                 path_in_repo=GH_PATH_IN_REPO,
                 branch=GH_BRANCH,
-                local_db_path=DB_PATH
+                local_db_path=DB_PATH,
+                return_sha=True  # <- guardamos o sha
             )
             if downloaded:
                 st.success("Banco baixado do GitHub na inicialização.")
+                st.session_state["gh_sha"] = remote_sha
             else:
                 st.info("Banco não existe no repositório. Será criado localmente ao salvar.")
         except Exception as e:
-            st.warning("Não foi possível baixar o banco do GitHub na inicialização. Verifique token/permissões em st.secrets.")
+            st.warning("Não foi possível baixar o banco do GitHub na inicialização. Verifique token/permissões.")
             st.exception(e)
         st.session_state["gh_db_fetched"] = True
 
@@ -64,15 +68,18 @@ with st.sidebar:
     if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
         if st.button("🔽 Baixar banco do GitHub (manual)"):
             try:
-                downloaded = download_db_from_github(
+                downloaded, remote_sha = download_db_from_github(
                     owner=GH_OWNER,
                     repo=GH_REPO,
                     path_in_repo=GH_PATH_IN_REPO,
                     branch=GH_BRANCH,
-                    local_db_path=DB_PATH
+                    local_db_path=DB_PATH,
+                    return_sha=True
                 )
                 if downloaded:
                     st.success("Banco baixado do GitHub (manual).")
+                    st.session_state["gh_sha"] = remote_sha
+                    st.session_state["gh_db_fetched"] = True
                 else:
                     st.info("Arquivo não existe no repositório.")
             except Exception as e:
@@ -93,18 +100,27 @@ with st.sidebar:
     confirma_texto = st.text_input("Digite **RESET** para confirmar:", value="")
 
     def _sync_after_reset(commit_message: str):
+        """
+        Para resets parciais: sobrescreve o remoto com a versão atual do .db local.
+        Aqui usamos upload direto com prev_sha (sem merge), para refletir o reset.
+        """
         if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
             try:
-                ok = upload_db_to_github(
+                ok, new_sha, status = upload_db_to_github(
                     owner=GH_OWNER,
                     repo=GH_REPO,
                     path_in_repo=GH_PATH_IN_REPO,
                     branch=GH_BRANCH,
                     local_db_path=DB_PATH,
-                    commit_message=commit_message
+                    commit_message=commit_message,
+                    prev_sha=st.session_state.get("gh_sha"),
+                    _return_details=True
                 )
                 if ok:
+                    st.session_state["gh_sha"] = new_sha or st.session_state.get("gh_sha")
                     st.success("Sincronização automática com GitHub concluída.")
+                else:
+                    st.warning(f"Falha ao sincronizar com GitHub (status={status}).")
             except Exception as e:
                 st.error("Falha ao sincronizar com GitHub.")
                 st.exception(e)
@@ -153,24 +169,29 @@ with st.sidebar:
     with col_r4:
         if st.button("🗑️ **RESET TOTAL** (apaga arquivo .db)", type="primary", disabled=not can_execute):
             try:
+                # Reset local (remove e recria schema)
+                hard_reset_local_db()
+                st.success("Banco recriado vazio (local).")
+
+                # Opcional: sincronizar remoto sobrescrevendo (sem merge)
                 if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
-                    def _uploader(commit_msg: str):
-                        return upload_db_to_github(
-                            owner=GH_OWNER,
-                            repo=GH_REPO,
-                            path_in_repo=GH_PATH_IN_REPO,
-                            branch=GH_BRANCH,
-                            local_db_path=DB_PATH,
-                            commit_message=commit_msg
-                        )
-                    ok = hard_reset_and_upload_to_github(_uploader)
+                    ok, new_sha, status = upload_db_to_github(
+                        owner=GH_OWNER,
+                        repo=GH_REPO,
+                        path_in_repo=GH_PATH_IN_REPO,
+                        branch=GH_BRANCH,
+                        local_db_path=DB_PATH,
+                        commit_message="Reset total: recria .db vazio",
+                        prev_sha=st.session_state.get("gh_sha"),
+                        _return_details=True
+                    )
                     if ok:
+                        st.session_state["gh_sha"] = new_sha or st.session_state.get("gh_sha")
                         st.success("Banco recriado vazio e sincronizado com GitHub.")
                     else:
-                        st.warning("Banco recriado vazio, mas a sincronização com GitHub falhou.")
+                        st.warning(f"Banco recriado vazio, mas a sincronização com GitHub falhou (status={status}).")
                 else:
-                    hard_reset_local_db()
-                    st.success("Banco recriado vazio (sem sync).")
+                    st.info("Reset local concluído (sync desativado).")
 
                 # Evita re-download automático indevido após reset
                 st.session_state["gh_db_fetched"] = True
@@ -179,7 +200,7 @@ with st.sidebar:
                 st.error("Falha no reset total.")
                 st.exception(e)
 
-# Inicializa DB
+# Inicializa DB (cria tabelas/índices se não existirem)
 init_db()
 
 # Diagnóstico rápido do arquivo .db
@@ -313,18 +334,22 @@ with tabs[0]:
                 total = count_all()
                 st.success(f"Dados salvos com sucesso. Total de linhas no banco: {total}")
 
+                # 🔁 Sincroniza com GitHub com merge automático em caso de conflito
                 if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
                     try:
-                        ok = upload_db_to_github(
+                        ok = safe_upload_with_merge(
                             owner=GH_OWNER,
                             repo=GH_REPO,
                             path_in_repo=GH_PATH_IN_REPO,
                             branch=GH_BRANCH,
                             local_db_path=DB_PATH,
-                            commit_message="Atualiza banco SQLite via app (salvar pacientes)"
+                            commit_message="Atualiza banco SQLite via app (salvar pacientes)",
+                            prev_sha=st.session_state.get("gh_sha")
                         )
                         if ok:
                             st.success("Sincronização automática com GitHub concluída.")
+                        else:
+                            st.error("Falha ao sincronizar com GitHub (após tentativa de merge).")
                     except Exception as e:
                         st.error("Falha ao sincronizar com GitHub.")
                         st.exception(e)
@@ -454,7 +479,7 @@ with tabs[1]:
     if not tipo_nome_list:
         st.warning("Nenhum **Tipo de Procedimento** ativo encontrado. Cadastre na aba **📚 Cadastro (Tipos & Situações)** e marque como **Ativo**.")
     if not sit_nome_list:
-        st.warning("Nenhuma **Situação da Cirurgia** ativa encontrada. Cadastre na aba **📚 Cadastro (Tipos & Situações)** e marque como **Ativo**.")
+        st.warning("Nenhuma **Situação da Cirurgia** ativa encontrado. Cadastre na aba **📚 Cadastro (Tipos & Situações)** e marque como **Ativo**.")
 
     # -------- Montar a Lista de Cirurgias com união (Cirurgias + Base) --------
     try:
@@ -557,18 +582,14 @@ with tabs[1]:
                 "Prestador": st.column_config.TextColumn(),
                 "Data_Cirurgia": st.column_config.TextColumn(help="Formato livre, ex.: dd/MM/yyyy ou YYYY-MM-DD."),
                 "Convenio": st.column_config.TextColumn(),
-
-                # ✅ Dropdown com os Tipos de serviço (ativos e ordenados)
                 "Tipo (nome)": st.column_config.SelectboxColumn(
                     options=[""] + tipo_nome_list,
                     help="Selecione o tipo de serviço cadastrado (apenas ativos)."
                 ),
-                # ✅ Dropdown com as Situações (ativas e ordenadas)
                 "Situação (nome)": st.column_config.SelectboxColumn(
                     options=[""] + sit_nome_list,
                     help="Selecione a situação da cirurgia (apenas ativas)."
                 ),
-
                 "Guia_AMHPTISS": st.column_config.TextColumn(),
                 "Guia_AMHPTISS_Complemento": st.column_config.TextColumn(),
                 "Fatura": st.column_config.TextColumn(),
@@ -584,7 +605,6 @@ with tabs[1]:
             if st.button("💾 Salvar alterações da Lista (UPSERT em massa)"):
                 try:
                     edited_df = edited_df.copy()
-
                     # Reconstroi IDs a partir dos nomes escolhidos
                     edited_df["Procedimento_Tipo_ID"] = edited_df["Tipo (nome)"].map(lambda n: tipo_nome2id.get(n) if n else None)
                     edited_df["Situacao_ID"] = edited_df["Situação (nome)"].map(lambda n: sit_nome2id.get(n) if n else None)
@@ -619,18 +639,22 @@ with tabs[1]:
                             num_skip += 1
                     st.success(f"UPSERT concluído. {num_ok} linha(s) salvas; {num_skip} ignorada(s) (chave incompleta).")
 
+                    # 🔁 Sync GitHub com merge automático
                     if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
                         try:
-                            ok = upload_db_to_github(
+                            ok = safe_upload_with_merge(
                                 owner=GH_OWNER,
                                 repo=GH_REPO,
                                 path_in_repo=GH_PATH_IN_REPO,
                                 branch=GH_BRANCH,
                                 local_db_path=DB_PATH,
-                                commit_message="Atualiza banco SQLite via app (salvar lista de cirurgias)"
+                                commit_message="Atualiza banco SQLite via app (salvar lista de cirurgias)",
+                                prev_sha=st.session_state.get("gh_sha")
                             )
                             if ok:
                                 st.success("Sincronização automática com GitHub concluída.")
+                            else:
+                                st.error("Falha ao sincronizar com GitHub (após tentativa de merge).")
                         except Exception as e:
                             st.error("Falha ao sincronizar com GitHub.")
                             st.exception(e)
@@ -662,18 +686,22 @@ with tabs[1]:
                 try:
                     delete_cirurgia(int(del_id))
                     st.success(f"Cirurgia id={int(del_id)} excluída.")
+
                     if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
                         try:
-                            ok = upload_db_to_github(
+                            ok = safe_upload_with_merge(
                                 owner=GH_OWNER,
                                 repo=GH_REPO,
                                 path_in_repo=GH_PATH_IN_REPO,
                                 branch=GH_BRANCH,
                                 local_db_path=DB_PATH,
-                                commit_message="Atualiza banco SQLite via app (excluir cirurgia)"
+                                commit_message="Atualiza banco SQLite via app (excluir cirurgia)",
+                                prev_sha=st.session_state.get("gh_sha")
                             )
                             if ok:
                                 st.success("Sincronização automática com GitHub concluída.")
+                            else:
+                                st.error("Falha ao sincronizar com GitHub (após tentativa de merge).")
                         except Exception as e:
                             st.error("Falha ao sincronizar com GitHub.")
                             st.exception(e)
@@ -701,18 +729,22 @@ with tabs[1]:
                         st.success("Registro apagado com sucesso.")
                     else:
                         st.info("Nenhum registro encontrado para a chave informada.")
+
                     if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
                         try:
-                            ok = upload_db_to_github(
+                            ok = safe_upload_with_merge(
                                 owner=GH_OWNER,
                                 repo=GH_REPO,
                                 path_in_repo=GH_PATH_IN_REPO,
                                 branch=GH_BRANCH,
                                 local_db_path=DB_PATH,
-                                commit_message="Exclusão por chave composta (1 registro)"
+                                commit_message="Exclusão por chave composta (1 registro)",
+                                prev_sha=st.session_state.get("gh_sha")
                             )
                             if ok:
                                 st.success("Sincronização automática com GitHub concluída.")
+                            else:
+                                st.error("Falha ao sincronizar com GitHub (após tentativa de merge).")
                         except Exception as e:
                             st.error("Falha ao sincronizar com GitHub.")
                             st.exception(e)
@@ -746,16 +778,19 @@ with tabs[1]:
                     # Sincroniza com GitHub, se habilitado
                     if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
                         try:
-                            ok = upload_db_to_github(
+                            ok = safe_upload_with_merge(
                                 owner=GH_OWNER,
                                 repo=GH_REPO,
                                 path_in_repo=GH_PATH_IN_REPO,
                                 branch=GH_BRANCH,
                                 local_db_path=DB_PATH,
-                                commit_message=f"Exclusão em lote de cirurgias ({total_apagadas} apagadas)"
+                                commit_message=f"Exclusão em lote de cirurgias ({total_apagadas} apagadas)",
+                                prev_sha=st.session_state.get("gh_sha")
                             )
                             if ok:
                                 st.success("Sincronização automática com GitHub concluída.")
+                            else:
+                                st.error("Falha ao sincronizar com GitHub (após tentativa de merge).")
                         except Exception as e:
                             st.error("Falha ao sincronizar com GitHub.")
                             st.exception(e)
@@ -816,16 +851,20 @@ with tabs[2]:
     def _upload_db_catalogo(commit_msg: str):
         if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
             try:
-                ok = upload_db_to_github(
+                # Para catálogos, podemos usar merge automático
+                ok = safe_upload_with_merge(
                     owner=GH_OWNER,
                     repo=GH_REPO,
                     path_in_repo=GH_PATH_IN_REPO,
                     branch=GH_BRANCH,
                     local_db_path=DB_PATH,
-                    commit_message=commit_msg
+                    commit_message=commit_msg,
+                    prev_sha=st.session_state.get("gh_sha")
                 )
                 if ok:
                     st.success("Sincronização automática com GitHub concluída.")
+                else:
+                    st.error("Falha ao sincronizar com GitHub (após tentativa de merge).")
             except Exception as e:
                 st.error("Falha ao sincronizar com GitHub.")
                 st.exception(e)
@@ -999,16 +1038,19 @@ with tabs[2]:
     def _upload_db_situacao(commit_msg: str):
         if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
             try:
-                ok = upload_db_to_github(
+                ok = safe_upload_with_merge(
                     owner=GH_OWNER,
                     repo=GH_REPO,
                     path_in_repo=GH_PATH_IN_REPO,
                     branch=GH_BRANCH,
                     local_db_path=DB_PATH,
-                    commit_message=commit_msg
+                    commit_message=commit_msg,
+                    prev_sha=st.session_state.get("gh_sha")
                 )
                 if ok:
                     st.success("Sincronização automática com GitHub concluída.")
+                else:
+                    st.error("Falha ao sincronizar com GitHub (após tentativa de merge).")
             except Exception as e:
                 st.error("Falha ao sincronizar com GitHub.")
                 st.exception(e)
