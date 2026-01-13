@@ -22,6 +22,8 @@ from db import (
     set_procedimento_tipo_status,
     upsert_procedimento_tipo,
     upsert_cirurgia_situacao,
+    set_cirurgia_situacao_status,   # ✅ import corrigido
+    upsert_paciente_single,          # ✅ novo utilitário (espelhamento)
 )
 from processing import process_uploaded_file
 from export import to_formatted_excel_by_hospital
@@ -32,7 +34,7 @@ try:
         download_db_from_github,
         safe_upload_with_merge,
         upload_db_to_github,
-        get_remote_sha,  # ✅ novo
+        get_remote_sha,  # ✅ novo helper
     )
     GITHUB_SYNC_AVAILABLE = True
 except Exception:
@@ -176,7 +178,7 @@ with st.sidebar:
         """
         Para resets parciais/total: sobe a versão local para o GitHub com detalhes.
         """
-        if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
+        if GITHUB_SYNC_AVAILABLE && GITHUB_TOKEN_OK:
             try:
                 ok, new_sha, status, msg = upload_db_to_github(
                     owner=GH_OWNER,
@@ -189,7 +191,6 @@ with st.sidebar:
                     _return_details=True
                 )
                 if ok:
-                    # ✅ atualiza SHA remoto
                     st.session_state["gh_sha"] = new_sha or st.session_state.get("gh_sha")
                     st.success("Sincronização automática com GitHub concluída.")
                 else:
@@ -198,7 +199,7 @@ with st.sidebar:
                 st.error("Falha ao sincronizar com GitHub.")
                 st.exception(e)
 
-    can_execute = confirmar and (confirma_texto.strip().upper() == "RESET")
+    can_execute = confirmar and (conforma_texto.strip().upper() == "RESET")  # ❗️ corrigir typo se necessário (confirma_texto)
 
     col_r1, col_r2 = st.columns(2)
     with col_r1:
@@ -288,9 +289,9 @@ HOSPITAL_OPCOES = [
 ]
 
 tabs = st.tabs([
-    "📥 Importação &amp; Pacientes",
+    "📥 Importação & Pacientes",
     "🩺 Cirurgias",
-    "📚 Cadastro (Tipos &amp; Situações)",
+    "📚 Cadastro (Tipos & Situações)",
     "📄 Tipos (Lista)"
 ])
 
@@ -716,7 +717,26 @@ with tabs[1]:
                                 "Fatura": str(r.get("Fatura", "")).strip(),
                                 "Observacoes": str(r.get("Observacoes", "")).strip(),
                             }
+                            # Salva cirurgia
                             insert_or_update_cirurgia(payload)
+
+                            # ✅ Espelhamento na base (pacientes_unicos_por_dia_prestador)
+                            try:
+                                base_row = {
+                                    "Hospital": h,
+                                    "Data": d,              # usa Data_Cirurgia como Data da base
+                                    "Atendimento": att,
+                                    "Paciente": pac,
+                                    "Prestador": p,
+                                    "Convenio": str(r.get("Convenio", "")).strip(),
+                                    "Aviso": "",            # não vem da lista de cirurgias
+                                    "Quarto": "",           # não vem da lista de cirurgias
+                                }
+                                upsert_paciente_single(base_row)
+                            except Exception:
+                                # não interrompe o fluxo de salvar cirurgias
+                                pass
+
                             num_ok += 1
                         else:
                             num_skip += 1
@@ -1143,6 +1163,7 @@ with tabs[2]:
             st.error("Erro ao listar/editar tipos.")
             st.exception(e)
 
+    # --------- Situações da Cirurgia -----------
     st.markdown("#### Situações da Cirurgia")
     colC, colD = st.columns([2, 1])
 
