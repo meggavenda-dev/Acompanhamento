@@ -6,6 +6,7 @@ db.py — Camada de acesso ao SQLite (persistência do app)
 Alterações principais:
 - Usa caminho estável (./data/exemplo.db) em vez de diretório temporário.
 - VACUUM com autocommit (fora de transação).
+- Funções de reset robustas (hard_reset_local_db e hard_reset_and_upload_to_github).
 - Mantém UNIQUE constraints e índices únicos idempotentes.
 """
 
@@ -104,29 +105,29 @@ def init_db():
     with engine.begin() as conn:
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS pacientes_unicos_por_dia_prestador (
-            Hospital   TEXT,
-            Ano        INTEGER,
-            Mes        INTEGER,
-            Dia        INTEGER,
-            Data       TEXT,
+            Hospital    TEXT,
+            Ano         INTEGER,
+            Mes         INTEGER,
+            Dia         INTEGER,
+            Data        TEXT,
             Atendimento TEXT,
-            Paciente   TEXT,
-            Aviso      TEXT,
-            Convenio   TEXT,
-            Prestador  TEXT,
-            Quarto     TEXT,
+            Paciente    TEXT,
+            Aviso       TEXT,
+            Convenio    TEXT,
+            Prestador   TEXT,
+            Quarto      TEXT,
             UNIQUE(Hospital, Atendimento, Paciente, Prestador, Data)
         );
         """))
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS cirurgias (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            Hospital   TEXT,
+            Hospital    TEXT,
             Atendimento TEXT,
-            Paciente   TEXT,
-            Prestador  TEXT,
+            Paciente    TEXT,
+            Prestador   TEXT,
             Data_Cirurgia TEXT,
-            Convenio   TEXT,
+            Convenio    TEXT,
             Procedimento_Tipo_ID INTEGER,
             Situacao_ID INTEGER,
             Guia_AMHPTISS TEXT,
@@ -175,12 +176,40 @@ def vacuum():
 def reset_db_file():
     """
     Remove o arquivo .db e recria o schema vazio.
-    Útil para 'RESET TOTAL' na UI.
+    Útil para 'RESET TOTAL' na UI (versão simples).
     """
     dispose_engine()
     if os.path.exists(DB_PATH):
         os.remove(DB_PATH)
     init_db()
+
+
+def hard_reset_local_db() -> None:
+    """
+    Fecha a engine, remove o arquivo .db e recria o schema vazio.
+    Versão robusta do reset total.
+    """
+    dispose_engine()
+    if os.path.exists(DB_PATH):
+        try:
+            os.remove(DB_PATH)
+        except Exception as e:
+            raise RuntimeError(f"Falha ao remover {DB_PATH}: {e}")
+    init_db()
+
+
+def hard_reset_and_upload_to_github(upload_fn) -> bool:
+    """
+    Reset total local e upload da versão vazia para o GitHub.
+    'upload_fn' é uma função que recebe (commit_msg) e executa o upload do DB_PATH.
+    Retorna True se o upload foi OK, False caso contrário.
+    """
+    hard_reset_local_db()
+    try:
+        ok = upload_fn("Reset total: recria .db vazio")
+        return bool(ok)
+    except Exception:
+        return False
 
 
 def delete_all_pacientes() -> int:
