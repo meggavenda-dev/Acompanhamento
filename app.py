@@ -7,8 +7,20 @@ import pandas as pd
 
 from db import (
     init_db, upsert_dataframe, read_all, DB_PATH, count_all,
-    vacuum, delete_all_pacientes, delete_all_cirurgias, delete_all_catalogos,
-    hard_reset_local_db
+    delete_all_pacientes, delete_all_cirurgias, delete_all_catalogos,
+    hard_reset_local_db, ensure_db_writable, vacuum,  # vacuum usado via wrapper
+    find_registros_para_prefill,
+    insert_or_update_cirurgia,
+    list_procedimento_tipos,
+    list_cirurgia_situacoes,
+    list_cirurgias,
+    delete_cirurgia,
+    list_registros_base_all,
+    delete_cirurgia_by_key,
+    delete_cirurgias_by_filter,
+    set_procedimento_tipo_status,
+    upsert_procedimento_tipo,
+    upsert_cirurgia_situacao,
 )
 from processing import process_uploaded_file
 from export import to_formatted_excel_by_hospital
@@ -34,15 +46,29 @@ st.set_page_config(page_title="Gestão de Pacientes e Cirurgias", layout="wide")
 st.title("Gestão de Pacientes e Cirurgias")
 st.caption("Download do banco no GitHub (opcional) → Importar/Processar → Revisar/Salvar → Exportar → Cirurgias (com catálogos) → Cadastro/Lista")
 
+# ---------------------------
+# Helper: VACUUM seguro
+# ---------------------------
+def try_vacuum_safely():
+    """Tenta executar VACUUM; se DB estiver read-only, não interrompe a UI."""
+    try:
+        ensure_db_writable()
+        vacuum()
+        st.caption("VACUUM executado com sucesso.")
+    except Exception as e:
+        msg = str(e).lower()
+        if "readonly" in msg or "read-only" in msg:
+            st.warning("VACUUM não pôde ser executado (banco read-only agora). Prosseguindo sem VACUUM.")
+        else:
+            st.info("Não foi possível executar VACUUM agora.")
+            st.exception(e)
+
 # =========================
 # Startup: baixar .db se não existir ou se parecer "vazio" (apenas schema)
 # =========================
 def _should_bootstrap_from_github(db_path: str, size_threshold_bytes: int = 10_000) -> bool:
     """
-    Retorna True se devemos baixar do GitHub:
-      - arquivo não existe, ou
-      - existe mas é muito pequeno (indicando .db recém-criado com apenas o schema).
-    Obs.: threshold padrão = 10 KB (ajuste conforme o seu schema real).
+    True se o arquivo não existe ou é muito pequeno (só schema).
     """
     if not os.path.exists(db_path):
         return True
@@ -67,7 +93,7 @@ if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
                 st.session_state["gh_sha"] = remote_sha
                 st.session_state["gh_db_fetched"] = True
                 st.success("Banco baixado do GitHub na inicialização (bootstrap).")
-                st.rerun()  # recarrega a UI já com o banco persistido
+                st.rerun()
             else:
                 st.info("Banco ainda não existe no GitHub. Um novo será criado localmente ao salvar.")
         except Exception as e:
@@ -110,6 +136,9 @@ with st.sidebar:
     if os.path.exists(DB_PATH):
         try:
             st.write(f"Tamanho do .db: {os.path.getsize(DB_PATH)} bytes")
+            db_dir = os.path.dirname(DB_PATH) or "."
+            st.caption(f"DB_DIR: {db_dir}")
+            st.caption(f"Diretório gravável: {os.access(db_dir, os.W_OK)}")
         except Exception:
             pass
 
@@ -155,8 +184,9 @@ with st.sidebar:
     with col_r1:
         if st.button("Apagar **PACIENTES** (tabela base)", type="secondary", disabled=not can_execute):
             try:
+                ensure_db_writable()
                 apagados = delete_all_pacientes()
-                vacuum()  # autocommit
+                try_vacuum_safely()
                 st.success(f"✅ {apagados} paciente(s) apagado(s) do banco.")
                 _sync_after_reset(f"Reset: apaga {apagados} pacientes")
                 st.rerun()
@@ -167,8 +197,9 @@ with st.sidebar:
     with col_r2:
         if st.button("Apagar **CIRURGIAS**", type="secondary", disabled=not can_execute):
             try:
+                ensure_db_writable()
                 apagadas = delete_all_cirurgias()
-                vacuum()
+                try_vacuum_safely()
                 st.session_state.pop("editor_lista_cirurgias_union", None)  # limpa cache do grid
                 st.success(f"✅ {apagadas} cirurgia(s) apagada(s) do banco.")
                 _sync_after_reset(f"Reset: apaga {apagadas} cirurgias")
@@ -181,8 +212,9 @@ with st.sidebar:
     with col_r3:
         if st.button("Apagar **CATÁLOGOS** (Tipos/Situações)", type="secondary", disabled=not can_execute):
             try:
+                ensure_db_writable()
                 apagados = delete_all_catalogos()
-                vacuum()
+                try_vacuum_safely()
                 st.success(f"✅ {apagados} registro(s) apagado(s) dos catálogos.")
                 _sync_after_reset(f"Reset: apaga {apagados} catálogos")
                 st.rerun()
@@ -193,7 +225,6 @@ with st.sidebar:
     with col_r4:
         if st.button("🗑️ **RESET TOTAL** (apaga arquivo .db)", type="primary", disabled=not can_execute):
             try:
-                # Reset local (remove e recria schema)
                 hard_reset_local_db()
                 st.success("Banco recriado vazio (local).")
 
@@ -337,6 +368,7 @@ with tabs[0]:
         st.markdown("#### Persistência")
         if st.button("Salvar no banco (exemplo.db)"):
             try:
+                ensure_db_writable()
                 upsert_dataframe(st.session_state.df_final)
                 total = count_all()
                 st.success(f"Dados salvos com sucesso. Total de linhas no banco: {total}")
@@ -365,6 +397,8 @@ with tabs[0]:
                 st.session_state.df_final = None
                 st.session_state.editor_key = "editor_pacientes_after_save"
 
+            except PermissionError as pe:
+                st.error(f"Diretório/arquivo do DB não é gravável. Ajuste 'DB_DIR' ou permissões. Detalhe: {pe}")
             except Exception as e:
                 st.error("Falha ao salvar no banco.")
                 st.exception(e)
@@ -405,18 +439,6 @@ with tabs[0]:
 # ====================================================================================
 with tabs[1]:
     st.subheader("Cadastrar / Editar Cirurgias (compartilha o mesmo banco)")
-    from db import (
-        find_registros_para_prefill,
-        insert_or_update_cirurgia,
-        list_procedimento_tipos,
-        list_cirurgia_situacoes,
-        list_cirurgias,
-        delete_cirurgia,
-        list_registros_base_all,
-        delete_cirurgia_by_key,
-        delete_cirurgias_by_filter
-    )
-    from export import to_formatted_excel_cirurgias
 
     st.markdown("#### Filtros para carregar pacientes na Lista de Cirurgias")
     colF0, colF1, colF2, colF3 = st.columns([1, 1, 1, 1])
@@ -543,8 +565,8 @@ with tabs[1]:
             "Prestador": df_base["Prestador"],
             "Data_Cirurgia": df_base["Data"],
             "Convenio": df_base["Convenio"],
-            "Procedimento_Tipo_ID": [None]*len(df_base),  # será preenchido ao salvar
-            "Situacao_ID": [None]*len(df_base),           # idem
+            "Procedimento_Tipo_ID": [None]*len(df_base),
+            "Situacao_ID": [None]*len(df_base),
             "Guia_AMHPTISS": ["" for _ in range(len(df_base))],
             "Guia_AMHPTISS_Complemento": ["" for _ in range(len(df_base))],
             "Fatura": ["" for _ in range(len(df_base))],
@@ -552,15 +574,13 @@ with tabs[1]:
             "created_at": [None]*len(df_base),
             "updated_at": [None]*len(df_base),
             "Fonte": ["Base"]*len(df_base),
-            "Tipo (nome)": ["" for _ in range(len(df_base))],  # edição por nome
-            "Situação (nome)": ["" for _ in range(len(df_base))]  # edição por nome
+            "Tipo (nome)": ["" for _ in range(len(df_base))],
+            "Situação (nome)": ["" for _ in range(len(df_base))],
         })
 
         # União preferindo registros já existentes (evita duplicar mesma chave)
         df_union = pd.concat([df_cir, df_base_mapped], ignore_index=True)
         df_union["_has_id"] = df_union["id"].notna().astype(int)
-
-        # Chave resiliente: usa Atendimento; se vazio, usa Paciente
         df_union["_AttOrPac"] = df_union["Atendimento"].fillna("").astype(str).str.strip()
         empty_mask = df_union["_AttOrPac"] == ""
         df_union.loc[empty_mask, "_AttOrPac"] = df_union.loc[empty_mask, "Paciente"].fillna("").astype(str).str.strip()
@@ -573,12 +593,11 @@ with tabs[1]:
         st.markdown("#### Lista de Cirurgias (com pacientes carregados da base)")
         st.caption("Edite diretamente no grid. Selecione **Tipo (nome)** e **Situação (nome)**; ao salvar, o app preenche os IDs correspondentes.")
 
-        # 👇 Oculta colunas ID/Fonte, numéricas e auditoria na visão do editor
+        # visão editável
         df_edit_view = df_union.drop(
             columns=["id", "Fonte", "Procedimento_Tipo_ID", "Situacao_ID", "created_at", "updated_at"],
             errors="ignore"
         )
-
         edited_df = st.data_editor(
             df_edit_view,
             use_container_width=True,
@@ -590,14 +609,8 @@ with tabs[1]:
                 "Prestador": st.column_config.TextColumn(),
                 "Data_Cirurgia": st.column_config.TextColumn(help="Formato livre, ex.: dd/MM/yyyy ou YYYY-MM-DD."),
                 "Convenio": st.column_config.TextColumn(),
-                "Tipo (nome)": st.column_config.SelectboxColumn(
-                    options=[""] + tipo_nome_list,
-                    help="Selecione o tipo de serviço cadastrado (apenas ativos)."
-                ),
-                "Situação (nome)": st.column_config.SelectboxColumn(
-                    options=[""] + sit_nome_list,
-                    help="Selecione a situação da cirurgia (apenas ativas)."
-                ),
+                "Tipo (nome)": st.column_config.SelectboxColumn(options=[""] + tipo_nome_list),
+                "Situação (nome)": st.column_config.SelectboxColumn(options=[""] + sit_nome_list),
                 "Guia_AMHPTISS": st.column_config.TextColumn(),
                 "Guia_AMHPTISS_Complemento": st.column_config.TextColumn(),
                 "Fatura": st.column_config.TextColumn(),
@@ -605,15 +618,14 @@ with tabs[1]:
             },
             key="editor_lista_cirurgias_union"
         )
-        # ✅ Garantir tipo correto após o editor
         edited_df = pd.DataFrame(edited_df)
 
         colG1, colG2, colG3 = st.columns([1.2, 1, 1.8])
         with colG1:
             if st.button("💾 Salvar alterações da Lista (UPSERT em massa)"):
                 try:
+                    ensure_db_writable()
                     edited_df = edited_df.copy()
-                    # Reconstroi IDs a partir dos nomes escolhidos
                     edited_df["Procedimento_Tipo_ID"] = edited_df["Tipo (nome)"].map(lambda n: tipo_nome2id.get(n) if n else None)
                     edited_df["Situacao_ID"] = edited_df["Situação (nome)"].map(lambda n: sit_nome2id.get(n) if n else None)
 
@@ -625,12 +637,11 @@ with tabs[1]:
                         p = str(r.get("Prestador", "")).strip()
                         d = str(r.get("Data_Cirurgia", "")).strip()
 
-                        # ✅ Chave mínima (resiliente): Hospital, Prestador, Data_Cirurgia e (Atendimento OU Paciente)
                         if h and p and d and (att or pac):
                             payload = {
                                 "Hospital": h,
-                                "Atendimento": att,  # pode ser vazio
-                                "Paciente": pac,     # pode ser vazio
+                                "Atendimento": att,
+                                "Paciente": pac,
                                 "Prestador": p,
                                 "Data_Cirurgia": d,
                                 "Convenio": str(r.get("Convenio", "")).strip(),
@@ -645,9 +656,8 @@ with tabs[1]:
                             num_ok += 1
                         else:
                             num_skip += 1
-                    st.success(f"UPSERT concluído. {num_ok} linha(s) salvas; {num_skip} ignorada(s) (chave incompleta).")
+                    st.success(f"UPSERT concluído. {num_ok} linha(s) salvas; {num_skip} ignorada(s).")
 
-                    # 🔁 Sync GitHub com merge automático + detalhes
                     if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
                         try:
                             ok, status, msg = safe_upload_with_merge(
@@ -668,6 +678,8 @@ with tabs[1]:
                             st.error("Falha ao sincronizar com GitHub.")
                             st.exception(e)
 
+                except PermissionError as pe:
+                    st.error(f"Diretório/arquivo do DB não é gravável. Ajuste 'DB_DIR' ou permissões. Detalhe: {pe}")
                 except Exception as e:
                     st.error("Falha ao salvar alterações da lista.")
                     st.exception(e)
@@ -693,6 +705,7 @@ with tabs[1]:
             del_id = st.number_input("Excluir cirurgia por id", min_value=0, step=1, value=0)
             if st.button("🗑️ Excluir cirurgia"):
                 try:
+                    ensure_db_writable()
                     delete_cirurgia(int(del_id))
                     st.success(f"Cirurgia id={int(del_id)} excluída.")
 
@@ -715,11 +728,13 @@ with tabs[1]:
                         except Exception as e:
                             st.error("Falha ao sincronizar com GitHub.")
                             st.exception(e)
+                except PermissionError as pe:
+                    st.error(f"Diretório/arquivo do DB não é gravável. Ajuste 'DB_DIR' ou permissões. Detalhe: {pe}")
                 except Exception as e:
                     st.error("Falha ao excluir.")
                     st.exception(e)
 
-        # --------- NOVO: Exclusão por chave composta (1 registro) ----------
+        # --------- Exclusão por chave (1 registro) ----------
         with st.expander("🗑️ Excluir por chave (um registro)", expanded=False):
             st.caption("Use quando você sabe Hospital, Atendimento, Paciente, Prestador e Data exatos.")
             colK1, colK2 = st.columns(2)
@@ -733,8 +748,9 @@ with tabs[1]:
 
             if st.button("Apagar por chave (1 registro)"):
                 try:
+                    ensure_db_writable()
                     removed = delete_cirurgia_by_key(key_h, key_att, key_pac, key_pre, key_dt)
-                    vacuum()
+                    try_vacuum_safely()
                     if removed:
                         st.success("Registro apagado com sucesso.")
                     else:
@@ -760,11 +776,13 @@ with tabs[1]:
                             st.error("Falha ao sincronizar com GitHub.")
                             st.exception(e)
                     st.rerun()
+                except PermissionError as pe:
+                    st.error(f"Diretório/arquivo do DB não é gravável. Ajuste 'DB_DIR' ou permissões. Detalhe: {pe}")
                 except Exception as e:
                     st.error("Falha na exclusão por chave.")
                     st.exception(e)
 
-        # --------- NOVO: Exclusão em lote por filtros ----------
+        # --------- Exclusão em lote por filtros ----------
         with st.expander("🗑️ Exclusão em lote (por filtros)", expanded=False):
             st.caption("Hospital é obrigatório. Demais filtros opcionais; se todos vazios, nada será apagado.")
             hosp_del = st.selectbox("Hospital", options=HOSPITAL_OPCOES, index=0, key="del_hosp")
@@ -777,16 +795,16 @@ with tabs[1]:
 
             if st.button("Apagar por filtros (lote)"):
                 try:
+                    ensure_db_writable()
                     total_apagadas = delete_cirurgias_by_filter(
                         hospital=hosp_del,
                         atendimentos=_to_list(atts_raw),
                         prestadores=_to_list(prests_raw),
                         datas=_to_list(datas_raw)
                     )
-                    vacuum()
+                    try_vacuum_safely()
                     st.success(f"{total_apagadas} cirurgia(s) apagada(s) com sucesso.")
 
-                    # Sincroniza com GitHub, se habilitado
                     if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
                         try:
                             ok, status, msg = safe_upload_with_merge(
@@ -808,6 +826,8 @@ with tabs[1]:
                             st.exception(e)
 
                     st.rerun()
+                except PermissionError as pe:
+                    st.error(f"Diretório/arquivo do DB não é gravável. Ajuste 'DB_DIR' ou permissões. Detalhe: {pe}")
                 except Exception as e:
                     st.error("Falha na exclusão em lote.")
                     st.exception(e)
@@ -840,7 +860,6 @@ with tabs[2]:
     if "tipo_bulk_reset" not in st.session_state:
         st.session_state["tipo_bulk_reset"] = 0
 
-    from db import list_procedimento_tipos
     df_tipos_cached = st.session_state.get("df_tipos_cached")
     if df_tipos_cached is None:
         tipos_all = list_procedimento_tipos(only_active=False)
@@ -891,7 +910,7 @@ with tabs[2]:
             tipo_ordem = int(st.session_state.get(f"tipo_ordem_input_{suffix}", next_tipo_ordem))
             tipo_ativo = bool(st.session_state.get(f"tipo_ativo_input_{suffix}", True))
 
-            from db import upsert_procedimento_tipo, list_procedimento_tipos
+            ensure_db_writable()
             tid = upsert_procedimento_tipo(tipo_nome, int(tipo_ativo), int(tipo_ordem))
             st.success(f"Tipo salvo (id={tid}).")
 
@@ -903,9 +922,15 @@ with tabs[2]:
             st.info(f"Próximo ID previsto: {prox_id}")
 
             _upload_db_catalogo("Atualiza catálogo de Tipos (salvar individual)")
+        except PermissionError as pe:
+            st.error(f"Diretório/arquivo do DB não é gravável. Ajuste 'DB_DIR' ou permissões. Detalhe: {pe}")
         except Exception as e:
-            st.error("Falha ao salvar tipo.")
-            st.exception(e)
+            msg = str(e).lower()
+            if "readonly" in msg or "read-only" in msg:
+                st.error("Banco está em modo somente leitura. Mova o .db para diretório gravável (DB_DIR) ou ajuste permissões.")
+            else:
+                st.error("Falha ao salvar tipo.")
+                st.exception(e)
         finally:
             st.session_state["tipo_form_reset"] += 1
 
@@ -930,14 +955,13 @@ with tabs[2]:
                 start_ordem = int(st.session_state.get(f"tipo_bulk_ordem_{suffix}", next_tipo_ordem))
                 ativo_padrao = bool(st.session_state.get(f"tipo_bulk_ativo_{suffix}", True))
 
-                # ✅ Correção de sintaxe: 'if ln'
                 linhas = [ln.strip() for ln in raw_text.splitlines()]
                 nomes = [ln for ln in linhas if ln]
                 if not nomes:
                     st.warning("Nada a cadastrar: informe ao menos um nome de tipo.")
                     return
 
-                from db import upsert_procedimento_tipo, list_procedimento_tipos
+                ensure_db_writable()
                 num_new, num_skip = 0, 0
                 vistos = set()
                 for i, nome in enumerate(nomes):
@@ -956,11 +980,12 @@ with tabs[2]:
                 st.session_state["df_tipos_cached"] = df3
 
                 st.success(f"Cadastro em lote concluído. Criados/atualizados: {num_new} | ignorados: {num_skip}")
-                # ✅ Correção de sintaxe: 'if not df3.empty'
                 prox_id = (df3["id"].max() + 1) if not df3.empty else 1
                 st.info(f"Próximo ID previsto: {prox_id}")
 
                 _upload_db_catalogo("Atualiza catálogo de Tipos (cadastro em lote)")
+            except PermissionError as pe:
+                st.error(f"Diretório/arquivo do DB não é gravável. Ajuste 'DB_DIR' ou permissões. Detalhe: {pe}")
             except Exception as e:
                 st.error("Falha no cadastro em lote de tipos.")
                 st.exception(e)
@@ -970,7 +995,6 @@ with tabs[2]:
         st.button("Salvar tipos em lote", on_click=_save_tipos_bulk_and_reset)
 
     with colB:
-        # Botão de recarregar tipos (cache do grid)
         st.markdown("##### Ações rápidas (Tipos)")
         col_btn_tipos, _ = st.columns([1.5, 2.5])
         with col_btn_tipos:
@@ -984,7 +1008,6 @@ with tabs[2]:
                     st.error("Falha ao recarregar tipos.")
                     st.exception(e)
 
-        from db import set_procedimento_tipo_status
         try:
             df_tipos = st.session_state.get("df_tipos_cached", pd.DataFrame(columns=["id", "nome", "ativo", "ordem"]))
             if not df_tipos.empty:
@@ -1001,6 +1024,7 @@ with tabs[2]:
                 )
                 if st.button("Aplicar alterações nos tipos"):
                     try:
+                        ensure_db_writable()
                         for _, r in df_tipos.iterrows():
                             set_procedimento_tipo_status(int(r["id"]), int(r["ativo"]))
                         st.success("Tipos atualizados.")
@@ -1013,6 +1037,8 @@ with tabs[2]:
                         st.info(f"Próximo ID previsto: {prox_id}")
 
                         _upload_db_catalogo("Atualiza catálogo de Tipos (aplicar alterações)")
+                    except PermissionError as pe:
+                        st.error(f"Diretório/arquivo do DB não é gravável. Ajuste 'DB_DIR' ou permissões. Detalhe: {pe}")
                     except Exception as e:
                         st.error("Falha ao aplicar alterações nos tipos.")
                         st.exception(e)
@@ -1029,7 +1055,6 @@ with tabs[2]:
     if "sit_form_reset" not in st.session_state:
         st.session_state["sit_form_reset"] = 0
 
-    from db import list_cirurgia_situacoes
     df_sits_cached = st.session_state.get("df_sits_cached")
     if df_sits_cached is None:
         sits_all = list_cirurgia_situacoes(only_active=False)
@@ -1080,7 +1105,7 @@ with tabs[2]:
             sit_ordem = int(st.session_state.get(f"sit_ordem_input_{suffix}", next_sit_ordem))
             sit_ativo = bool(st.session_state.get(f"sit_ativo_input_{suffix}", True))
 
-            from db import upsert_cirurgia_situacao, list_cirurgia_situacoes
+            ensure_db_writable()
             sid = upsert_cirurgia_situacao(sit_nome, int(sit_ativo), int(sit_ordem))
             st.success(f"Situação salva (id={sid}).")
 
@@ -1092,9 +1117,15 @@ with tabs[2]:
             st.info(f"Próximo ID previsto: {prox_id_s}")
 
             _upload_db_situacao("Atualiza catálogo de Situações (salvar individual)")
+        except PermissionError as pe:
+            st.error(f"Diretório/arquivo do DB não é gravável. Ajuste 'DB_DIR' ou permissões. Detalhe: {pe}")
         except Exception as e:
-            st.error("Falha ao salvar situação.")
-            st.exception(e)
+            msg = str(e).lower()
+            if "readonly" in msg or "read-only" in msg:
+                st.error("Banco está em modo somente leitura. Mova o .db para diretório gravável (DB_DIR) ou ajuste permissões.")
+            else:
+                st.error("Falha ao salvar situação.")
+                st.exception(e)
         finally:
             st.session_state["sit_form_reset"] += 1
 
@@ -1106,7 +1137,6 @@ with tabs[2]:
         st.button("Salvar situação", on_click=_save_sit_and_reset)
 
     with colD:
-        # Botão de recarregar situações (cache do grid)
         st.markdown("##### Ações rápidas (Situações)")
         col_btn_sits, _ = st.columns([1.5, 2.5])
         with col_btn_sits:
@@ -1120,7 +1150,6 @@ with tabs[2]:
                     st.error("Falha ao recarregar situações.")
                     st.exception(e)
 
-        from db import set_cirurgia_situacao_status
         try:
             df_sits = st.session_state.get("df_sits_cached", pd.DataFrame(columns=["id", "nome", "ativo", "ordem"]))
             if not df_sits.empty:
@@ -1137,6 +1166,7 @@ with tabs[2]:
                 )
                 if st.button("Aplicar alterações nas situações"):
                     try:
+                        ensure_db_writable()
                         for _, r in df_sits.iterrows():
                             set_cirurgia_situacao_status(int(r["id"]), int(r["ativo"]))
                         st.success("Situações atualizadas.")
@@ -1149,6 +1179,8 @@ with tabs[2]:
                         st.info(f"Próximo ID previsto: {prox_id_s}")
 
                         _upload_db_situacao("Atualiza catálogo de Situações (aplicar alterações)")
+                    except PermissionError as pe:
+                        st.error(f"Diretório/arquivo do DB não é gravável. Ajuste 'DB_DIR' ou permissões. Detalhe: {pe}")
                     except Exception as e:
                         st.error("Falha ao aplicar alterações nas situações.")
                         st.exception(e)
@@ -1164,8 +1196,6 @@ with tabs[2]:
 with tabs[3]:
     st.subheader("Lista de Tipos de Procedimento")
     st.caption("Visualize, filtre, busque, ordene e exporte todos os tipos (ativos e inativos).")
-
-    from db import list_procedimento_tipos
 
     try:
         tipos_all = list_procedimento_tipos(only_active=False)
@@ -1246,7 +1276,7 @@ with tabs[3]:
 
     with st.expander("ℹ️ Ajuda / Diagnóstico", expanded=False):
         st.markdown("""
-        - **Status**: escolha **Ativos** para ver apenas os que aparecem na Aba **Cirurgias** (dropdown “Tipo (nome)”).
+        - **Status**: escolha **Ativos** para ver apenas os que aparecem na Aba **Cirurgias**.
         - **Ordenação**: por padrão ordenamos por **ordem** e depois por **nome**.
         - **Busca**: digite parte do nome e pressione Enter.
         - **Paginação**: ajuste conforme necessário.
