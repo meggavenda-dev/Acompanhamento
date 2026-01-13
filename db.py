@@ -3,14 +3,15 @@
 """
 db.py — Camada de acesso ao SQLite (persistência do app)
 
-Alterações principais:
-- Usa caminho estável e gravável (DB_DIR via env -> ./data -> /tmp).
+Principais recursos:
+- Caminho estável e gravável (DB_DIR via env -> ./data -> /tmp).
 - PRAGMAs úteis (FK, WAL, synchronous).
-- VACUUM robusto (checkpoint + optimize) com conexão sqlite3 dedicada.
-- Funções de reset robustas (hard_reset_local_db e hard_reset_and_upload_to_github).
-- Exclusão por chave composta e por filtros (delete_cirurgia_by_key, delete_cirurgias_by_filter).
-- Mantém UNIQUE constraints e índices únicos idempotentes.
-- ✅ (Novo) upsert_paciente_single e delete_paciente_by_key (suporte a “mover” registros na base).
+- VACUUM robusto (checkpoint + optimize) usando sqlite3 e dispose_engine() para evitar locks.
+- Índices únicos idempotentes para ON CONFLICT confiável.
+- Reset/Manutenção (hard_reset_local_db, vacuum, etc).
+- Base (pacientes): upsert_dataframe, upsert_paciente_single, delete_paciente_by_key, leituras.
+- Catálogos: listar, upsert, ativar/inativar.
+- Cirurgias: upsert, listar (com filtro Ano/Mês), excluir por id/chave, excluir por filtros.
 """
 
 from __future__ import annotations
@@ -314,7 +315,7 @@ def delete_all_cirurgias() -> int:
     with eng.begin() as conn:
         total = conn.execute(text("SELECT COUNT(*) FROM cirurgias")).scalar_one()
         conn.execute(text("DELETE FROM cirurgias"))
-        return int(total or 0)
+    return int(total or 0)
 
 
 # =============================================================================
@@ -459,7 +460,7 @@ def count_all() -> int:
 
 def _date_filter_clause(colname: str, ano: Optional[int], mes: Optional[int]) -> Tuple[str, dict]:
     """
-    Monta filtro por ano/mês tolerante a 'dd/MM/yyyy' ou 'YYYY-MM-DD'.
+    Monta filtro por ano/mês tolerante a 'dd/MM/yyyy' ou 'YYYY-MM'.
     """
     params = {}
     parts = []
@@ -491,7 +492,7 @@ def find_registros_para_prefill(
     where = ["Hospital = :h"]
     params = {"h": hospital}
 
-    # Filtro por Data (aceita 'dd/MM/yyyy' e 'YYYY-MM-DD')
+    # Filtro por Data (aceita 'dd/MM/yyyy' e 'YYYY-MM')
     clause, p = _date_filter_clause("Data", ano, mes)
     if clause:
         where.append(clause[5:] if clause.startswith(" AND ") else clause)
@@ -668,19 +669,63 @@ def insert_or_update_cirurgia(payload: Dict[str, Any]) -> int:
         return int(row[0]) if row else 0
 
 
-def list_cirurgias(hospital: Optional[str] = None, ano_mes: Optional[str] = None, prestador: Optional[str] = None) -> List[Tuple]:
-    clauses, params = [], {}
+def _ano_mes_clause_for_cirurgias(ano_mes: Optional[str]) -> Tuple[str, dict]:
+    """
+    Monta filtro por Ano/Mês para 'Data_Cirurgia' aceitando:
+      - 'YYYY-MM%' (ISO-like)
+      - '%/MM/YYYY' (brasileiro com dia primeiro)
+    """
+    if not ano_mes:
+        return "", {}
+    try:
+        year_str, month_str = ano_mes.split("-", 1)
+        year = int(year_str)
+        month = int(month_str)
+    except Exception:
+        # formato inesperado; usa LIKE direto
+        return " AND Data_Cirurgia LIKE :dmx", {"dmx": f"{ano_mes}%"}
+
+    return " AND ((Data_Cirurgia LIKE :dm1) OR (Data_Cirurgia LIKE :dm2))", {
+        "dm1": f"{year}-{month:02d}-%",    # ISO-like
+        "dm2": f"%/{month:02d}/{year}"     # BR-like
+    }
+
+
+def list_cirurgias(
+    hospital: Optional[str] = None,
+    ano_mes: Optional[str] = None,
+    prestador: Optional[str] = None
+) -> List[Tuple]:
+    """
+    Lista cirurgias com filtros opcionais:
+      - hospital: exato
+      - ano_mes: 'YYYY-MM' (aceita ambas formas ao persistir)
+      - prestador: exato (se informado)
+    """
+    clauses = []
+    params: Dict[str, Any] = {}
+
     if hospital:
         clauses.append("Hospital=:h")
         params["h"] = hospital
+
     if prestador:
         clauses.append("Prestador=:p")
         params["p"] = prestador
-    if ano_mes:
-        clauses.append("Data_Cirurgia LIKE :dm")
-        params["dm"] = f"{ano_mes[:7]}%"
 
-    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    # Filtro Ano/Mês para Data_Cirurgia
+    ano_mes_clause, ano_mes_params = _ano_mes_clause_for_cirurgias(ano_mes)
+    where = " AND ".join(clauses)
+    if where:
+        where = " WHERE " + where
+        if ano_mes_clause:
+            where += ano_mes_clause
+            params.update(ano_mes_params)
+    else:
+        if ano_mes_clause:
+            where = " WHERE 1=1 " + ano_mes_clause
+            params.update(ano_mes_params)
+
     sql = f"""
         SELECT id, Hospital, Atendimento, Paciente, Prestador, Data_Cirurgia,
                Convenio, Procedimento_Tipo_ID, Situacao_ID,
@@ -740,7 +785,7 @@ def delete_cirurgias_by_filter(
     ensure_db_writable()
 
     clauses = ["Hospital=:h"]
-    params = {"h": hospital.strip()}
+    params: Dict[str, Any] = {"h": hospital.strip()}
 
     def _add_in(field: str, values: Optional[Sequence[str]], key_prefix: str):
         if values:
