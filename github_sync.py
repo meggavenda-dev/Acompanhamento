@@ -2,11 +2,12 @@
 # -*- coding: utf-8 -*-
 """
 github_sync.py — Sincronização do arquivo SQLite (.db) com o GitHub (Contents API),
-com controle de versão via 'sha' e merge automático em caso de conflito.
+com controle de versão via 'sha', preflight GET (create vs update) e
+merge automático em caso de conflito (409) com retorno detalhado.
 
 Funcionalidades:
 - download_db_from_github(..., return_sha=False) -> bool ou (bool, sha)
-- upload_db_to_github(..., prev_sha=None, _return_details=False) -> bool ou (ok, new_sha, status)
+- upload_db_to_github(..., prev_sha=None, _return_details=False) -> bool ou (ok, new_sha, status, message)
 - safe_upload_with_merge(..., _return_details=False) -> bool ou (ok, status, message)
 
 Dependências:
@@ -60,7 +61,7 @@ def _resolve_token(token: Optional[str]) -> Optional[str]:
 def _gh_headers(token: Optional[str]) -> dict:
     headers = {
         "Accept": "application/vnd.github+json",
-        "User-Agent": "github-sync-sqlite/1.1",
+        "User-Agent": "github-sync-sqlite/1.2",
     }
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -145,7 +146,7 @@ def download_db_from_github(
 
 
 # =========================
-# Upload do .db (Contents API)
+# Upload do .db (Contents API) com preflight GET
 # =========================
 
 def upload_db_to_github(
@@ -158,46 +159,80 @@ def upload_db_to_github(
     token: Optional[str] = None,
     prev_sha: Optional[str] = None,
     _return_details: bool = False
-) -> Union[bool, Tuple[bool, Optional[str], int]]:
+) -> Union[bool, Tuple[bool, Optional[str], int, str]]:
     """
     Faz upload (PUT) do arquivo local para o GitHub (Contents API).
-    - Se 'prev_sha' for informado, evita overwrite cego.
-    - Retornos:
-        * _return_details=False: bool (True se OK, False caso contrário)
-        * _return_details=True: (ok: bool, new_sha: Optional[str], status_code: int)
+    - Se 'prev_sha' for informado, tenta update diretamente com esse sha.
+    - Se 'prev_sha' for None, primeiro faz GET para descobrir se o arquivo existe:
+        * 200: arquivo existe -> usa sha do remoto no payload (update)
+        * 404: arquivo não existe -> cria (sem sha)
+    - Retorna:
+        * _return_details=False: bool
+        * _return_details=True: (ok, new_sha, status_code, message)
     """
     token = _resolve_token(token)
-    url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path_in_repo}"
+    url_put = f"https://api.github.com/repos/{owner}/{repo}/contents/{path_in_repo}"
 
     if not os.path.exists(local_db_path):
-        return (False, None, 0) if _return_details else False
+        msg = "Local db file not found"
+        return (False, None, 0, msg) if _return_details else False
 
+    # Lê arquivo local
     with open(local_db_path, "rb") as f:
-        b64 = base64.b64encode(f.read()).decode("utf-8")
+        raw = f.read()
+    if len(raw) == 0:
+        msg = "Local db file is empty (0 bytes)"
+        return (False, None, 422, msg) if _return_details else False
+
+    b64 = base64.b64encode(raw).decode("utf-8")
+
+    # Decide entre create/update
+    sha_to_use = prev_sha
+    if not sha_to_use:
+        # Descobre se o arquivo existe
+        url_get = f"https://api.github.com/repos/{owner}/{repo}/contents/{path_in_repo}?ref={branch}"
+        status_get, content_get = _http_get(url_get, _gh_headers(token))
+        if status_get == 200:
+            try:
+                data_get = json.loads(content_get.decode("utf-8"))
+                sha_to_use = data_get.get("sha")
+            except Exception:
+                sha_to_use = None
+        elif status_get == 404:
+            sha_to_use = None
+        else:
+            # Falha em descobrir; retorne erro detalhado
+            msg = f"Preflight GET failed (status={status_get})"
+            return (False, None, status_get, msg) if _return_details else False
 
     payload = {
         "message": commit_message,
         "content": b64,
         "branch": branch,
     }
-    if prev_sha:
-        payload["sha"] = prev_sha
+    if sha_to_use:
+        payload["sha"] = sha_to_use  # update
+    # else: create
 
-    status, content = _http_put_json(url, _gh_headers(token), payload)
-    if status in (200, 201):
+    status_put, content_put = _http_put_json(url_put, _gh_headers(token), payload)
+    if status_put in (200, 201):
         try:
-            data = json.loads(content.decode("utf-8"))
-            new_sha = (data.get("content") or {}).get("sha")
+            data_put = json.loads(content_put.decode("utf-8"))
+            new_sha = (data_put.get("content") or {}).get("sha")
         except Exception:
             new_sha = None
-        return (True, new_sha, status) if _return_details else True
+        return (True, new_sha, status_put, "OK") if _return_details else True
 
-    # Falha
-    return (False, None, status) if _return_details else False
+    # Retorna a mensagem do GitHub (body) para diagnóstico
+    try:
+        msg = content_put.decode("utf-8")
+    except Exception:
+        msg = ""
+    return (False, None, status_put, msg) if _return_details else False
 
 
 # =========================
-# Upload seguro com merge automático
+# Upload seguro com merge automático e retorno detalhado
 # =========================
 
 def safe_upload_with_merge(
@@ -223,7 +258,7 @@ def safe_upload_with_merge(
       - se _return_details=True: (ok: bool, status: int, message: str)
     """
     # Tentativa inicial
-    ok, new_sha, status = upload_db_to_github(
+    ok, new_sha, status, msg = upload_db_to_github(
         owner, repo, path_in_repo, branch, local_db_path, commit_message,
         token=token, prev_sha=prev_sha, _return_details=True
     )
@@ -243,8 +278,8 @@ def safe_upload_with_merge(
             # não conseguiu baixar remoto
             try: os.unlink(tmp_remote_path)
             except Exception: pass
-            msg = "Conflito 409, mas falha ao baixar remoto"
-            return (False, 409, msg) if _return_details else False
+            msg2 = "Conflito 409, mas falha ao baixar remoto"
+            return (False, 409, msg2) if _return_details else False
 
         tmp_merged = tempfile.NamedTemporaryFile(prefix="merged_", suffix=".db", delete=False)
         tmp_merged_path = tmp_merged.name
@@ -260,11 +295,11 @@ def safe_upload_with_merge(
             except Exception: pass
             try: os.unlink(tmp_remote_path)
             except Exception: pass
-            msg = f"Falha no merge: {e}"
-            return (False, 409, msg) if _return_details else False
+            msg2 = f"Falha no merge: {e}"
+            return (False, 409, msg2) if _return_details else False
 
         # Reenvia com sha atualizado do remoto
-        ok2, new_sha2, status2 = upload_db_to_github(
+        ok2, new_sha2, status2, msg2 = upload_db_to_github(
             owner, repo, path_in_repo, branch, local_db_path,
             f"{commit_message} (merge automático)", token=token, prev_sha=remote_sha2,
             _return_details=True
@@ -276,7 +311,7 @@ def safe_upload_with_merge(
         if ok2 and new_sha2:
             return (True, status2, "Upload após merge OK") if _return_details else True
 
-        return (False, status2, "Falha ao subir após merge") if _return_details else False
+        return (False, status2, f"Falha ao subir após merge: {msg2}") if _return_details else False
 
-    # Outros erros
-    return (False, status, "Falha inicial de upload") if _return_details else False
+    # Outros erros (inclui 422)
+    return (False, status, f"Falha inicial de upload: {msg}") if _return_details else False
