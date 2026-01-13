@@ -10,7 +10,7 @@ Alterações principais:
 - Funções de reset robustas (hard_reset_local_db e hard_reset_and_upload_to_github).
 - Exclusão por chave composta e por filtros (delete_cirurgia_by_key, delete_cirurgias_by_filter).
 - Mantém UNIQUE constraints e índices únicos idempotentes.
-- ✅ (Novo) upsert_paciente_single: espelhamento de 1 linha na base a partir da Aba Cirurgias.
+- ✅ (Novo) upsert_paciente_single e delete_paciente_by_key (suporte a “mover” registros na base).
 """
 
 from __future__ import annotations
@@ -314,7 +314,7 @@ def delete_all_cirurgias() -> int:
     with eng.begin() as conn:
         total = conn.execute(text("SELECT COUNT(*) FROM cirurgias")).scalar_one()
         conn.execute(text("DELETE FROM cirurgias"))
-    return int(total or 0)
+        return int(total or 0)
 
 
 # =============================================================================
@@ -408,6 +408,30 @@ def upsert_paciente_single(row: Dict[str, Any]) -> Tuple[int, int]:
         df["Dia"] = None
 
     return upsert_dataframe(df)
+
+
+def delete_paciente_by_key(
+    hospital: str,
+    atendimento: str,
+    paciente: str,
+    prestador: str,
+    data: str
+) -> int:
+    """
+    Exclui 1 registro da base 'pacientes_unicos_por_dia_prestador' usando a chave única composta.
+    Retorna o número de linhas afetadas (0 ou 1).
+    """
+    ensure_db_writable()
+    eng = get_engine()
+    with eng.begin() as conn:
+        res = conn.execute(text("""
+            DELETE FROM pacientes_unicos_por_dia_prestador
+            WHERE Hospital=:h AND Atendimento=:a AND Paciente=:p AND Prestador=:pr AND Data=:d
+        """), {
+            "h": hospital.strip(), "a": atendimento.strip(), "p": paciente.strip(),
+            "pr": prestador.strip(), "d": data.strip()
+        })
+        return res.rowcount or 0
 
 
 def read_all() -> List[Tuple]:
