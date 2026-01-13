@@ -7,11 +7,11 @@ com controle de versão via 'sha' e merge automático em caso de conflito.
 Funcionalidades:
 - download_db_from_github(..., return_sha=False) -> bool ou (bool, sha)
 - upload_db_to_github(..., prev_sha=None, _return_details=False) -> bool ou (ok, new_sha, status)
-- safe_upload_with_merge(...) -> bool    # tenta upload; se conflito, baixa remoto, faz merge e reenvia
+- safe_upload_with_merge(..., _return_details=False) -> bool ou (ok, status, message)
 
 Dependências:
 - requests (opcional; cai para urllib se ausente)
-- sqlalchemy (para merge SQLite; utilizada pelo módulo db_merge.py)
+- sqlalchemy (usada pelo módulo db_merge.py) — apenas no merge
 """
 
 import base64
@@ -21,7 +21,7 @@ import shutil
 import tempfile
 from typing import Optional, Tuple, Union
 
-# 👉 Importa a função de merge do módulo externo
+# Importa a função de merge do módulo externo
 from db_merge import merge_sqlite_dbs
 
 # HTTP: usa 'requests' se disponível; senão, 'urllib'
@@ -60,7 +60,7 @@ def _resolve_token(token: Optional[str]) -> Optional[str]:
 def _gh_headers(token: Optional[str]) -> dict:
     headers = {
         "Accept": "application/vnd.github+json",
-        "User-Agent": "github-sync-sqlite/1.0",
+        "User-Agent": "github-sync-sqlite/1.1",
     }
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -116,11 +116,6 @@ def download_db_from_github(
     """
     Baixa um arquivo binário do repositório GitHub (Contents API) e salva em 'local_db_path'.
     Se o arquivo não existir no repo/branch, retorna False (e None se return_sha=True).
-    Parâmetros:
-        - owner, repo, path_in_repo, branch: localização do arquivo no GitHub
-        - local_db_path: caminho local para salvar
-        - token: opcional; se não informado, tenta st.secrets["GITHUB_TOKEN"] ou os.environ
-        - return_sha: se True, retorna (downloaded, remote_sha); senão, retorna apenas 'bool'
     """
     token = _resolve_token(token)
     url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path_in_repo}?ref={branch}"
@@ -128,7 +123,6 @@ def download_db_from_github(
     if status == 404:
         return (False, None) if return_sha else False
     if status != 200:
-        # Falha (rede/permissão/etc.)
         return (False, None) if return_sha else False
 
     try:
@@ -167,18 +161,10 @@ def upload_db_to_github(
 ) -> Union[bool, Tuple[bool, Optional[str], int]]:
     """
     Faz upload (PUT) do arquivo local para o GitHub (Contents API).
-    - Se 'prev_sha' for informado, evita overwrite cego: GitHub valida se a base é a versão esperada.
+    - Se 'prev_sha' for informado, evita overwrite cego.
     - Retornos:
-        * Por padrão (_return_details=False): bool (True se OK, False caso contrário)
-        * Se _return_details=True: (ok: bool, new_sha: Optional[str], status_code: int)
-
-    Observação: Contents API aceita:
-      {
-        "message": "...",
-        "content": "<base64>",
-        "branch": "...",
-        "sha": "<sha atual>"    # obrigatório para update; omita para criar novo arquivo
-      }
+        * _return_details=False: bool (True se OK, False caso contrário)
+        * _return_details=True: (ok: bool, new_sha: Optional[str], status_code: int)
     """
     token = _resolve_token(token)
     url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path_in_repo}"
@@ -222,29 +208,30 @@ def safe_upload_with_merge(
     local_db_path: str,
     commit_message: str,
     token: Optional[str] = None,
-    prev_sha: Optional[str] = None
-) -> bool:
+    prev_sha: Optional[str] = None,
+    _return_details: bool = False
+) -> Union[bool, Tuple[bool, int, str]]:
     """
-    Tenta upload com 'prev_sha'. Se houver conflito (ex.: sha mudou no remoto),
-    faz o seguinte:
-      1) Baixa remoto atual (pega 'remote_sha2')
-      2) Mescla local+remoto em um arquivo temporário (merge_sqlite_dbs do módulo db_merge)
-      3) Substitui o local pelo mesclado
+    Tenta upload com 'prev_sha'. Em conflito (409):
+      1) Baixa remoto (pega 'remote_sha2')
+      2) Mescla local+remoto (merge_sqlite_dbs)
+      3) Substitui local pelo mesclado
       4) Reenvia com prev_sha atualizado
 
-    Retorna True se concluir a sincronização; False caso contrário.
+    Retorno:
+      - se _return_details=False: bool
+      - se _return_details=True: (ok: bool, status: int, message: str)
     """
-    # 1) Tentativa inicial de upload
+    # Tentativa inicial
     ok, new_sha, status = upload_db_to_github(
         owner, repo, path_in_repo, branch, local_db_path, commit_message,
         token=token, prev_sha=prev_sha, _return_details=True
     )
     if ok and new_sha:
-        return True
+        return (True, status, "Upload OK") if _return_details else True
 
-    # 2) Conflito? (sha mudou ou outra condição de 409)
     if status == 409:
-        # Baixa remoto atualizado (para merge)
+        # Conflito → baixar remoto e mesclar
         tmp_remote = tempfile.NamedTemporaryFile(prefix="remote_", suffix=".db", delete=False)
         tmp_remote_path = tmp_remote.name
         tmp_remote.close()
@@ -253,49 +240,43 @@ def safe_upload_with_merge(
             owner, repo, path_in_repo, branch, tmp_remote_path, token=token, return_sha=True
         )
         if not downloaded:
-            # Não foi possível baixar o remoto; aborta
-            try:
-                os.unlink(tmp_remote_path)
-            except Exception:
-                pass
-            return False
+            # não conseguiu baixar remoto
+            try: os.unlink(tmp_remote_path)
+            except Exception: pass
+            msg = "Conflito 409, mas falha ao baixar remoto"
+            return (False, 409, msg) if _return_details else False
 
-        # Gera banco mesclado
         tmp_merged = tempfile.NamedTemporaryFile(prefix="merged_", suffix=".db", delete=False)
         tmp_merged_path = tmp_merged.name
         tmp_merged.close()
 
         try:
-            # 👉 Chamada ao módulo externo db_merge.py
             merge_sqlite_dbs(local_db_path, tmp_remote_path, tmp_merged_path)
-            # Substitui local
+            # substitui local
             shutil.move(tmp_merged_path, local_db_path)
-        except Exception:
+        except Exception as e:
             # Falha no merge
-            try:
-                os.unlink(tmp_merged_path)
-            except Exception:
-                pass
-            try:
-                os.unlink(tmp_remote_path)
-            except Exception:
-                pass
-            return False
+            try: os.unlink(tmp_merged_path)
+            except Exception: pass
+            try: os.unlink(tmp_remote_path)
+            except Exception: pass
+            msg = f"Falha no merge: {e}"
+            return (False, 409, msg) if _return_details else False
 
-        # Reenvia com sha do remoto atualizado
+        # Reenvia com sha atualizado do remoto
         ok2, new_sha2, status2 = upload_db_to_github(
             owner, repo, path_in_repo, branch, local_db_path,
             f"{commit_message} (merge automático)", token=token, prev_sha=remote_sha2,
             _return_details=True
         )
 
-        # Limpeza de temporários
-        try:
-            os.unlink(tmp_remote_path)
-        except Exception:
-            pass
+        try: os.unlink(tmp_remote_path)
+        except Exception: pass
 
-        return bool(ok2 and new_sha2)
+        if ok2 and new_sha2:
+            return (True, status2, "Upload após merge OK") if _return_details else True
 
-    # 3) Outros erros
-    return False
+        return (False, status2, "Falha ao subir após merge") if _return_details else False
+
+    # Outros erros
+    return (False, status, "Falha inicial de upload") if _return_details else False
