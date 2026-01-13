@@ -702,7 +702,7 @@ with tabs[1]:
             "Fatura": ["" for _ in range(len(df_base))],
             "Observacoes": ["" for _ in range(len(df_base))],
             "created_at": [None]*len(df_base),
-            "updated_at": [None]*len(df_base],
+            "updated_at": [None]*len(df_base),
             "Fonte": ["Base"]*len(df_base),
             "Tipo (nome)": ["" for _ in range(len(df_base))],
             "Situação (nome)": ["" for _ in range(len(df_base))],
