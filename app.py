@@ -619,7 +619,8 @@ with tabs[1]:
         df_cir = pd.DataFrame(rows_cir, columns=[
             "id", "Hospital", "Atendimento", "Paciente", "Prestador", "Data_Cirurgia",
             "Convenio", "Procedimento_Tipo_ID", "Situacao_ID", "Guia_AMHPTISS", 
-            "Guia_AMHPTISS_Complemento", "Fatura", "Observacoes", "created_at", "updated_at"
+            "Guia_AMHPTISS_Complemento", "Fatura", "Data_Pagamento", # ADICIONE AQUI
+            "Observacoes", "created_at", "updated_at"
         ])
 
         df_base_mapped = pd.DataFrame()
@@ -633,6 +634,8 @@ with tabs[1]:
                     "Hospital": df_base["Hospital"], "Atendimento": df_base["Atendimento"],
                     "Paciente": df_base["Paciente"], "Prestador": df_base["Prestador"],
                     "Data_Cirurgia": df_base["Data"], "Convenio": df_base["Convenio"],
+                    "Guia_AMHPTISS_Complemento": "", # ADICIONE AQUI
+                    "Data_Pagamento": None,           # ADICIONE AQUI
                     "Fonte": "Base"
                 })
 
