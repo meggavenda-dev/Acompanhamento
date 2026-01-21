@@ -644,24 +644,43 @@ with tabs[1]:
 
 
 
+        
         df_base_mapped = pd.DataFrame()
+        
         if not ignorar_base:
-            base_rows = find_registros_para_prefill(hosp_cad, ano=int(ano_cad) if usar_periodo else None, 
-                                                   mes=int(mes_cad) if usar_periodo else None, 
-                                                   prestadores=prestadores_lista_filtro)
+            base_rows = find_registros_para_prefill(
+                hosp_cad,
+                ano=int(ano_cad) if usar_periodo else None,
+                mes=int(mes_cad) if usar_periodo else None,
+                prestadores=prestadores_lista_filtro
+            )
+            
             if base_rows:
-                df_base = pd.DataFrame(base_rows, columns=["Hospital", "Data", "Atendimento", "Paciente", "Convenio", "Prestador"])
+                # Agora df_base existe
+                df_base = pd.DataFrame(
+                    base_rows,
+                    columns=["Hospital", "Data", "Atendimento", "Paciente", "Convenio", "Prestador"]
+                )
+        
+                # 🔥 Correção REAL da data (somente aqui!)
+                df_base["Data"] = pd.to_datetime(df_base["Data"], dayfirst=True, errors="coerce")
+                df_base["Data"].fillna(
+                    pd.to_datetime(df_base["Data"], errors="coerce"),
+                    inplace=True
+                )
+        
                 df_base_mapped = pd.DataFrame({
-                    "Hospital": df_base["Hospital"], 
+                    "Hospital": df_base["Hospital"],
                     "Atendimento": df_base["Atendimento"],
-                    "Paciente": df_base["Paciente"], 
+                    "Paciente": df_base["Paciente"],
                     "Prestador": df_base["Prestador"],
-                    "Data_Cirurgia": df_base["Data"], 
+                    "Data_Cirurgia": df_base["Data"],  # agora com datetime correto
                     "Convenio": df_base["Convenio"],
-                    "Guia_AMHPTISS_Complemento": "", # Garantindo a coluna
-                    "Data_Pagamento": None,           # Garantindo a coluna
+                    "Guia_AMHPTISS_Complemento": "",
+                    "Data_Pagamento": None,
                     "Fonte": "Base"
                 })
+
 
         df_union = pd.concat([df_cir, df_base_mapped], ignore_index=True)
         df_union["has_id"] = df_union["id"].notna()
