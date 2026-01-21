@@ -637,8 +637,8 @@ with tabs[1]:
                     "Hospital": df_base["Hospital"], "Atendimento": df_base["Atendimento"],
                     "Paciente": df_base["Paciente"], "Prestador": df_base["Prestador"],
                     "Data_Cirurgia": df_base["Data"], "Convenio": df_base["Convenio"],
-                    "Guia_AMHPTISS_Complemento": "", # ADICIONE AQUI
-                    "Data_Pagamento": None,           # ADICIONE AQUI
+                    "Guia_AMHPTISS_Complemento": "", # Garantindo a coluna
+                    "Data_Pagamento": None,           # Garantindo a coluna
                     "Fonte": "Base"
                 })
 
