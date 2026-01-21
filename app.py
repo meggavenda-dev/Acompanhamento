@@ -660,21 +660,32 @@ with tabs[1]:
         df_union["Tipo (nome)"] = df_union["Procedimento_Tipo_ID"].map(tipo_id2nome).fillna("")
         df_union["Situação (nome)"] = df_union["Situacao_ID"].map(sit_id2nome).fillna("")
 
+        
         # 5. Recuperação de Snapshot
         if "cirurgias_editadas_snapshot" in st.session_state:
-            snap = st.session_state["cirurgias_editadas_snapshot"]
-            # Chaves que identificam a linha de forma única
+            snap = st.session_state["cirurgias_editadas_snapshot"].copy()
+        
+            # O snapshot SEMPRE vem com strings — então deixamos df_union como string até o merge
+            # Convertendo Data_Cirurgia do snapshot para string também (garantia)
+            snap["Data_Cirurgia"] = snap["Data_Cirurgia"].astype(str)
+        
             keys = ["Hospital", "Atendimento", "Paciente", "Prestador", "Data_Cirurgia"]
-            
-            # Tenta unir o que está na memória (snap) com o que veio do banco (df_union)
+        
+            # Convertemos df_union para string antes do merge para evitar "object x datetime"
+            df_union["Data_Cirurgia"] = df_union["Data_Cirurgia"].astype(str)
+        
             df_union = df_union.merge(snap, on=keys, how="left", suffixes=("", "_snap"))
-            
-            # Se houver valor no snapshot, ele substitui o do banco
-            for col in ["Tipo (nome)", "Situação (nome)", "Convenio", "Guia_AMHPTISS", "Guia_AMHPTISS_Complemento", "Fatura", "Data_Pagamento", "Observacoes"]:
+        
+            for col in ["Tipo (nome)", "Situação (nome)", "Convenio", "Guia_AMHPTISS",
+                        "Guia_AMHPTISS_Complemento", "Fatura", "Data_Pagamento", "Observacoes"]:
                 if f"{col}_snap" in df_union.columns:
                     df_union[col] = df_union[f"{col}_snap"].combine_first(df_union[col])
-            
+        
             df_union = df_union.drop(columns=[c for c in df_union.columns if c.endswith("_snap")])
+        
+        # --- SOMENTE AGORA convertendo para datetime ---
+        df_union["Data_Cirurgia"] = pd.to_datetime(df_union["Data_Cirurgia"], errors="coerce")
+        df_union["Data_Pagamento"] = pd.to_datetime(df_union["Data_Pagamento"], errors="coerce")
 
         
         # 6. Grid de Edição
