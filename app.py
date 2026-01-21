@@ -547,6 +547,64 @@ with tabs[1]:
     sit_filter_ids = [sit_nome2id[n] for n in sit_filter_nomes if n in sit_nome2id]
     ignorar_base = len(sit_filter_ids) > 0
 
+    # --- INÍCIO DA INCLUSÃO MANUAL ---
+    with st.expander("➕ Incluir Cirurgia Manualmente (Fora da Base)", expanded=False):
+        st.info("Use esta seção para cadastrar cirurgias de pacientes que não constam na planilha de importação.")
+        
+        with st.form("form_inclusao_manual", clear_on_submit=True):
+            colM1, colM2 = st.columns(2)
+            with colM1:
+                m_paciente = st.text_input("Nome do Paciente *")
+                m_atendimento = st.text_input("Número do Atendimento")
+                m_data = st.date_input("Data da Cirurgia", value=datetime.now())
+            with colM2:
+                m_prestador = st.text_input("Nome do Prestador *")
+                m_convenio = st.text_input("Convênio")
+                m_tipo_nome = st.selectbox("Tipo de Procedimento", options=[""] + tipo_nome_list)
+                m_situacao_nome = st.selectbox("Situação", options=[""] + sit_nome_list)
+
+            m_obs = st.text_area("Observações")
+            
+            btn_manual = st.form_submit_button("Confirmar Inclusão Manual")
+            
+            if btn_manual:
+                if not m_paciente or not m_prestador:
+                    st.error("Paciente e Prestador são obrigatórios.")
+                else:
+                    payload_manual = {
+                        "Hospital": hosp_cad,
+                        "Atendimento": m_atendimento,
+                        "Paciente": m_paciente.upper(),
+                        "Prestador": m_prestador.upper(),
+                        "Data_Cirurgia": m_data.strftime("%Y-%m-%d"),
+                        "Convenio": m_convenio.upper(),
+                        "Procedimento_Tipo_ID": tipo_nome2id.get(m_tipo_nome),
+                        "Situacao_ID": sit_nome2id.get(m_situacao_nome),
+                        "Guia_AMHPTISS": "",
+                        "Guia_AMHPTISS_Complemento": "",
+                        "Fatura": "",
+                        "Observacoes": m_obs
+                    }
+                    
+                    try:
+                        ensure_db_writable()
+                        insert_or_update_cirurgia(payload_manual)
+                        st.success(f"Cirurgia de {m_paciente} incluída com sucesso!")
+                        st.cache_data.clear()
+                        
+                        # Sincronização automática com GitHub após inclusão manual
+                        if GITHUB_SYNC_AVAILABLE and GITHUB_TOKEN_OK:
+                            safe_upload_with_merge(
+                                owner=GH_OWNER, repo=GH_REPO, path_in_repo=GH_PATH_IN_REPO,
+                                branch=GH_BRANCH, local_db_path=DB_PATH,
+                                commit_message=f"Inclusão manual: {m_paciente}",
+                                prev_sha=st.session_state.get("gh_sha")
+                            )
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Erro ao incluir manualmente: {e}")
+    # --- FIM DA INCLUSÃO MANUAL ---
+
     # 4. Construção da União (Union)
     try:
         ano_mes_str = f"{int(ano_cad)}-{int(mes_cad):02d}" if (usar_periodo and not ignorar_base) else None
