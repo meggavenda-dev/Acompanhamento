@@ -663,16 +663,28 @@ with tabs[1]:
         # 5. Recuperação de Snapshot
         if "cirurgias_editadas_snapshot" in st.session_state:
             snap = st.session_state["cirurgias_editadas_snapshot"]
+            # Chaves que identificam a linha de forma única
             keys = ["Hospital", "Atendimento", "Paciente", "Prestador", "Data_Cirurgia"]
+            
+            # Tenta unir o que está na memória (snap) com o que veio do banco (df_union)
             df_union = df_union.merge(snap, on=keys, how="left", suffixes=("", "_snap"))
             
-            for col in ["Tipo (nome)", "Situação (nome)", "Convenio", "Guia_AMHPTISS", "Fatura", "Observacoes"]:
+            # Se houver valor no snapshot, ele substitui o do banco
+            for col in ["Tipo (nome)", "Situação (nome)", "Convenio", "Guia_AMHPTISS", "Guia_AMHPTISS_Complemento", "Fatura", "Data_Pagamento", "Observacoes"]:
                 if f"{col}_snap" in df_union.columns:
-                    df_union[col] = df_union[f"{col}_snap"].combine_first(df_union[col].astype(str))
+                    df_union[col] = df_union[f"{col}_snap"].combine_first(df_union[col])
+            
             df_union = df_union.drop(columns=[c for c in df_union.columns if c.endswith("_snap")])
 
         # 6. Grid de Edição
         st.markdown("#### Grid de Edição")
+
+        # --- DEFINA AS COLUNAS AQUI ---
+        cols_view = [
+            "Hospital", "Atendimento", "Paciente", "Prestador", "Data_Cirurgia", "Convenio", 
+            "Tipo (nome)", "Situação (nome)", "Guia_AMHPTISS", "Guia_AMHPTISS_Complemento", 
+            "Fatura", "Data_Pagamento", "Observacoes"
+        ]
 
         # --- DEFINA A VARIÁVEL AQUI (ANTES DO EDITOR) ---
         editor_key = f"grid_{hosp_cad}_{ano_cad}_{mes_cad}"
@@ -688,7 +700,7 @@ with tabs[1]:
                 "Data_Pagamento": st.column_config.DateColumn("Data Pgto", format="DD/MM/YYYY"),
                 "Guia_AMHPTISS_Complemento": st.column_config.TextColumn("Guia Comp."),
             },
-            key=editor_key # Agora a variável existe e o erro NameError sumirá
+            key=editor_key
         )
         
         # Salva o estado atual no snapshot para não perder ao recarregar
