@@ -616,13 +616,19 @@ with tabs[1]:
         ano_mes_str = f"{int(ano_cad)}-{int(mes_cad):02d}" if (usar_periodo and not ignorar_base) else None
         rows_cir = list_cirurgias(hospital=hosp_cad, ano_mes=ano_mes_str, situacoes=sit_filter_ids if ignorar_base else None)
         
-        df_cir = pd.DataFrame(rows_cir, columns=[
+        # Primeiro, criamos o DataFrame com as colunas que REALMENTE vêm do banco
+        # Se o erro diz que vêm 15, listamos apenas as 15 originais aqui:
+        cols_originais = [
             "id", "Hospital", "Atendimento", "Paciente", "Prestador", "Data_Cirurgia",
             "Convenio", "Procedimento_Tipo_ID", "Situacao_ID", "Guia_AMHPTISS", 
-            "Guia_AMHPTISS_Complemento", "Fatura", "Data_Pagamento", # ADICIONE AQUI
-            "Observacoes", "created_at", "updated_at"
-        ])
+            "Guia_AMHPTISS_Complemento", "Fatura", "Observacoes", "created_at", "updated_at"
+        ]
+        
+        # Cria o DataFrame com o que existe no banco
+        df_cir = pd.DataFrame(rows_cir, columns=cols_originais)
 
+        # Agora, adicionamos a coluna nova manualmente se ela não existir
+        # Isso evita o erro de "16 vs 15" e permite que o app rode
         if "Data_Pagamento" not in df_cir.columns:
             df_cir["Data_Pagamento"] = None
 
@@ -634,9 +640,12 @@ with tabs[1]:
             if base_rows:
                 df_base = pd.DataFrame(base_rows, columns=["Hospital", "Data", "Atendimento", "Paciente", "Convenio", "Prestador"])
                 df_base_mapped = pd.DataFrame({
-                    "Hospital": df_base["Hospital"], "Atendimento": df_base["Atendimento"],
-                    "Paciente": df_base["Paciente"], "Prestador": df_base["Prestador"],
-                    "Data_Cirurgia": df_base["Data"], "Convenio": df_base["Convenio"],
+                    "Hospital": df_base["Hospital"], 
+                    "Atendimento": df_base["Atendimento"],
+                    "Paciente": df_base["Paciente"], 
+                    "Prestador": df_base["Prestador"],
+                    "Data_Cirurgia": df_base["Data"], 
+                    "Convenio": df_base["Convenio"],
                     "Guia_AMHPTISS_Complemento": "", # Garantindo a coluna
                     "Data_Pagamento": None,           # Garantindo a coluna
                     "Fonte": "Base"
