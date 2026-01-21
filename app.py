@@ -291,47 +291,6 @@ tabs = st.tabs([
     "📄 Tipos (Lista)"
 ])
 
-
-# =======================
-# Inicializa DB
-# =======================
-init_db()
-
-# -----------------------------------------------------------------
-# Cache de dados (com TTL + versão) para processamento de arquivo
-# -----------------------------------------------------------------
-@st.cache_data(ttl=900, show_spinner=False)
-def _process_file_cached(file_bytes: bytes, file_name: str, prestadores_lista: list, hospital: str,
-                         upload_id: str, app_cache_version: str) -> pd.DataFrame:
-    bio = BytesIO(file_bytes)
-    try:
-        bio.name = file_name or "upload.bin"
-    except Exception:
-        pass
-    df = process_uploaded_file(bio, prestadores_lista, hospital)
-    return pd.DataFrame(df) if df is not None else pd.DataFrame()
-
-# Diagnóstico rápido do arquivo .db
-with st.expander("🔎 Diagnóstico do arquivo .db (local)", expanded=False):
-    exists = os.path.exists(DB_PATH)
-    size = os.path.getsize(DB_PATH) if exists else 0
-    st.caption(f"Caminho: `{DB_PATH}` | Existe: {exists} | Tamanho: {size} bytes | Linhas (pacientes): {count_all()}")
-
-# Lista única de hospitais
-HOSPITAL_OPCOES = [
-    "Hospital Santa Lucia Sul",
-    "Hospital Santa Lucia Norte",
-    "Hospital Maria Auxiliadora",
-]
-
-# ---------------- Abas ----------------
-tabs = st.tabs([
-    "📥 Importação & Pacientes",
-    "🩺 Cirurgias",
-    "📚 Cadastro (Tipos & Situações)",
-    "📄 Tipos (Lista)"
-])
-
 # ====================================================================================
 # 📥 Aba 1: Importação & Pacientes
 # ====================================================================================
