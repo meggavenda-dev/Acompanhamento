@@ -673,6 +673,9 @@ with tabs[1]:
 
         # 6. Grid de Edição
         st.markdown("#### Grid de Edição")
+        # Criamos uma key que só muda se o Hospital ou Mês mudarem, evitando resets ao digitar
+        grid_key = f"grid_{hosp_cad}_{ano_cad}_{mes_cad}"
+        
         cols_view = [
             "Hospital", "Atendimento", "Paciente", "Prestador", "Data_Cirurgia", "Convenio", 
             "Tipo (nome)", "Situação (nome)", "Guia_AMHPTISS", "Guia_AMHPTISS_Complemento", # Adicionado aqui
@@ -682,15 +685,17 @@ with tabs[1]:
         edited_df = st.data_editor(
             df_union[cols_view],
             use_container_width=True,
+            hide_index=True,
             column_config={
+                "Data_Cirurgia": st.column_config.DateColumn("Data Atendimento", format="DD/MM/YYYY", required=True),
+                "Data_Pagamento": st.column_config.DateColumn("Data Pgto", format="DD/MM/YYYY"),
                 "Tipo (nome)": st.column_config.SelectboxColumn(options=[""] + tipo_nome_list),
                 "Situação (nome)": st.column_config.SelectboxColumn(options=[""] + sit_nome_list),
-                "Data_Pagamento": st.column_config.DateColumn("Data Pgto", format="DD/MM/YYYY"),
-                "Guia_AMHPTISS_Complemento": st.column_config.TextColumn("Guia Comp."),
             },
-            key="editor_cirurgias_final"
+            key=editor_key # ESSENCIAL: Mantém o estado do grid fixo
         )
-        st.session_state["cirurgias_editadas_snapshot"] = edited_df
+        if not edited_df.equals(df_union[cols_view]):
+            st.session_state["cirurgias_editadas_snapshot"] = edited_df
 
         # --- CORREÇÃO AQUI: DEFINIÇÃO DAS COLUNAS PARA OS BOTÕES ---
         col_btn_save, col_btn_export = st.columns(2)
