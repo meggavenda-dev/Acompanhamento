@@ -632,6 +632,18 @@ with tabs[1]:
         if "Data_Pagamento" not in df_cir.columns:
             df_cir["Data_Pagamento"] = None
 
+        
+        # Garantir que Campo "Data" da base seja datetime válido
+        df_base["Data"] = pd.to_datetime(df_base["Data"], dayfirst=True, errors="coerce")
+
+        
+        df_base["Data"] = (
+            pd.to_datetime(df_base["Data"], dayfirst=True, errors="coerce")
+              .fillna(pd.to_datetime(df_base["Data"], errors="coerce"))
+        )
+
+
+
         df_base_mapped = pd.DataFrame()
         if not ignorar_base:
             base_rows = find_registros_para_prefill(hosp_cad, ano=int(ano_cad) if usar_periodo else None, 
