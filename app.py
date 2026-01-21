@@ -679,28 +679,23 @@ with tabs[1]:
             # Força o checkpoint no GitHub Sync (via função interna)
             st.rerun()
 
-    with col_btn_export:
-            # BLOCO DE EXPORTAÇÃO INSERIDO AQUI
-            if st.button("📊 Preparar Excel para Download", use_container_width=True):
-                try:
-                    df_export = edited_df.copy()
-                    excel_data = to_formatted_excel_cirurgias(df_export)
-                        
-                    st.download_button(
-                        label="⬇️ Clique para Baixar Planilha",
-                        data=excel_data,
-                        file_name=f"Cirurgias_{datetime.now().strftime('%d_%m_%Y')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True
-                     )
-                except Exception as e:
-                    st.error(f"Erro ao gerar Excel: {e}")
-            
-
-    except Exception as e:
-        st.error(f"Erro na Aba de Cirurgias: {e}")
-        st.exception(e)
-
+        with col_btn_export:
+                # BLOCO DE EXPORTAÇÃO INSERIDO AQUI
+                if st.button("📊 Preparar Excel para Download", use_container_width=True):
+                    try:
+                        df_export = edited_df.copy()
+                        excel_data = to_formatted_excel_cirurgias(df_export)
+                                
+                        st.download_button(
+                            label="⬇️ Clique para Baixar Planilha",
+                            data=excel_data,
+                            file_name=f"Cirurgias_{datetime.now().strftime('%d_%m_%Y')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True
+                            )
+                    except Exception as e:
+                        st.error(f"Erro ao gerar Excel: {e}")
+       
         with st.expander("🗑️ Exclusão em lote (por filtros)", expanded=False):
             st.caption("Hospital é obrigatório. Demais filtros opcionais; se todos vazios, nada será apagado.")
             hosp_del = st.selectbox("Hospital", options=HOSPITAL_OPCOES, index=0, key="del_hosp")
