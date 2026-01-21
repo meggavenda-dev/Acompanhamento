@@ -542,11 +542,15 @@ def list_registros_base_all(limit: int = 500) -> List[Tuple]:
 # =============================================================================
 
 def list_procedimento_tipos(only_active: bool = True) -> List[Tuple]:
+    """
+    Lista tipos com ordenação determinística para o Selectbox do Streamlit.
+    """
     eng = get_engine()
-    sql = "SELECT id, nome, ativo, ordem FROM procedimento_tipos"
+    # Adicionamos o TRIM no nome para garantir que o Streamlit não veja duplicatas por causa de espaços
+    sql = "SELECT id, TRIM(nome) as nome, ativo, ordem FROM procedimento_tipos"
     if only_active:
         sql += " WHERE ativo=1"
-    sql += " ORDER BY ordem, nome"
+    sql += " ORDER BY ordem ASC, nome ASC"
     with eng.connect() as conn:
         return conn.execute(text(sql)).fetchall()
 
@@ -611,22 +615,25 @@ def set_cirurgia_situacao_status(sid: int, ativo: int) -> None:
 
 def insert_or_update_cirurgia(payload: Dict[str, Any]) -> int:
     """
-    UPSERT de cirurgia. A chave é:
-    (Hospital, Atendimento, Paciente, Prestador, Data_Cirurgia)
-    Observação: Aceita Atendimento vazio se Paciente vier preenchido (e vice-versa).
+    UPSERT de cirurgia com tratamento de timestamps para Sincronização GitHub.
     """
     ensure_unique_indexes()
     ensure_db_writable()
 
+    # Normalização rigorosa para evitar quebras no mapeamento
     h = _safe_str(payload.get("Hospital"))
     att = _safe_str(payload.get("Atendimento"), "")
     pac = _safe_str(payload.get("Paciente"), "")
     p = _safe_str(payload.get("Prestador"))
     d = _safe_str(payload.get("Data_Cirurgia"))
+    
+    # Validação de integridade
     if not h or not p or not d or (not att and not pac):
-        raise ValueError("Chave mínima inválida para cirurgia.")
+        return 0
 
-    now = datetime.now().isoformat(timespec="seconds")
+    # O timestamp atual é VITAL para o merge do GitHub (last-write-wins)
+    now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
     eng = get_engine()
     with eng.begin() as conn:
         conn.execute(text("""
@@ -639,7 +646,7 @@ def insert_or_update_cirurgia(payload: Dict[str, Any]) -> int:
             VALUES (
                 :Hospital, :Atendimento, :Paciente, :Prestador, :Data,
                 :Convenio, :TipoID, :SitID,
-                :Guia, :GuiaC, :Fatura, :Obs, :created, :updated
+                :Guia, :GuiaC, :Fatura, :Obs, :now, :now
             )
             ON CONFLICT(Hospital, Atendimento, Paciente, Prestador, Data_Cirurgia)
             DO UPDATE SET
@@ -650,7 +657,7 @@ def insert_or_update_cirurgia(payload: Dict[str, Any]) -> int:
                 Guia_AMHPTISS_Complemento=excluded.Guia_AMHPTISS_Complemento,
                 Fatura=excluded.Fatura,
                 Observacoes=excluded.Observacoes,
-                updated_at=excluded.updated_at
+                updated_at=excluded.updated_at -- Importante para o Merge do GitHub
         """), {
             "Hospital": h, "Atendimento": att, "Paciente": pac, "Prestador": p, "Data": d,
             "Convenio": _safe_str(payload.get("Convenio")),
@@ -660,10 +667,11 @@ def insert_or_update_cirurgia(payload: Dict[str, Any]) -> int:
             "GuiaC": _safe_str(payload.get("Guia_AMHPTISS_Complemento")),
             "Fatura": _safe_str(payload.get("Fatura")),
             "Obs": _safe_str(payload.get("Observacoes")),
-            "created": now, "updated": now
+            "now": now_ts
         })
+        
         row = conn.execute(text("""
-            SELECT id FROM cirurgias
+            SELECT id FROM cirurgias 
             WHERE Hospital=:h AND Atendimento=:a AND Paciente=:p AND Prestador=:pr AND Data_Cirurgia=:d
         """), {"h": h, "a": att, "p": pac, "pr": p, "d": d}).fetchone()
         return int(row[0]) if row else 0
