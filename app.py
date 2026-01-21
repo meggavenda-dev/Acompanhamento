@@ -570,11 +570,10 @@ with tabs[1]:
     prestadores_filtro = st.text_input("Filtrar Prestadores (separar por ; )", value="")
     prestadores_lista_filtro = [p.strip() for p in prestadores_filtro.split(";") if p.strip()]
 
-    # 2. Carregamento de Catálogos (Com limpeza de strings)
+    # 2. Carregamento de Catálogos (Mapeamentos)
     tipos_rows_all = list_procedimento_tipos(only_active=False)
     df_tipos_all = pd.DataFrame(tipos_rows_all, columns=["id", "nome", "ativo", "ordem"])
     tipo_id2nome = dict(zip(df_tipos_all["id"], df_tipos_all["nome"]))
-    # Dicionário reverso apenas com ativos para o Selectbox, limpando espaços
     tipo_nome2id = {str(r["nome"]).strip(): r["id"] for _, r in df_tipos_all.iterrows() if r["ativo"] == 1}
     tipo_nome_list = sorted(tipo_nome2id.keys())
 
@@ -584,14 +583,13 @@ with tabs[1]:
     sit_nome2id = {str(r["nome"]).strip(): r["id"] for _, r in df_sits_all.iterrows() if r["ativo"] == 1}
     sit_nome_list = sorted(sit_nome2id.keys())
 
-    # 3. Filtro de Situação (Se ativo, restringe a busca apenas às cirurgias salvas)
+    # 3. Filtro de Situação
     sit_filter_nomes = st.multiselect("Filtrar por Situação (ignora candidatos da Base)", options=sit_nome_list)
     sit_filter_ids = [sit_nome2id[n] for n in sit_filter_nomes if n in sit_nome2id]
     ignorar_base = len(sit_filter_ids) > 0
 
     # 4. Construção da União (Union)
     try:
-        # Busca cirurgias já salvas
         ano_mes_str = f"{int(ano_cad)}-{int(mes_cad):02d}" if (usar_periodo and not ignorar_base) else None
         rows_cir = list_cirurgias(hospital=hosp_cad, ano_mes=ano_mes_str, situacoes=sit_filter_ids if ignorar_base else None)
         
@@ -601,7 +599,6 @@ with tabs[1]:
             "Guia_AMHPTISS_Complemento", "Fatura", "Observacoes", "created_at", "updated_at"
         ])
 
-        # Busca candidatos da Base (apenas se não estiver filtrando por situação de cirurgia)
         df_base_mapped = pd.DataFrame()
         if not ignorar_base:
             base_rows = find_registros_para_prefill(hosp_cad, ano=int(ano_cad) if usar_periodo else None, 
@@ -616,19 +613,16 @@ with tabs[1]:
                     "Fonte": "Base"
                 })
 
-        # Merge de União
         df_union = pd.concat([df_cir, df_base_mapped], ignore_index=True)
-        # Prioriza a linha que já tem ID (Cirurgia salva) no drop_duplicates
         df_union["has_id"] = df_union["id"].notna()
         df_union = df_union.sort_values("has_id", ascending=False).drop_duplicates(
             subset=["Hospital", "Atendimento", "Paciente", "Prestador", "Data_Cirurgia"], keep="first"
         )
 
-        # Mapeia nomes para exibição
         df_union["Tipo (nome)"] = df_union["Procedimento_Tipo_ID"].map(tipo_id2nome).fillna("")
         df_union["Situação (nome)"] = df_union["Situacao_ID"].map(sit_id2nome).fillna("")
 
-        # 5. Recuperação de Snapshot (Impede perda de dados ao mudar filtro)
+        # 5. Recuperação de Snapshot
         if "cirurgias_editadas_snapshot" in st.session_state:
             snap = st.session_state["cirurgias_editadas_snapshot"]
             keys = ["Hospital", "Atendimento", "Paciente", "Prestador", "Data_Cirurgia"]
@@ -653,48 +647,44 @@ with tabs[1]:
             },
             key="editor_cirurgias_final"
         )
-
-        # Salva o que foi digitado no estado da sessão
         st.session_state["cirurgias_editadas_snapshot"] = edited_df
 
-        # 7. Botão Salvar (Com resolução de IDs e Checkpoint)
-        if st.button("💾 Salvar Alterações"):
-            ensure_db_writable()
-            for _, r in edited_df.iterrows():
-                # Só salva se tiver um Tipo ou Situação preenchido (indica intenção de virar cirurgia)
-                if r["Tipo (nome)"] or r["Situação (nome)"]:
-                    payload = {
-                        "Hospital": r["Hospital"], "Atendimento": r["Atendimento"],
-                        "Paciente": r["Paciente"], "Prestador": r["Prestador"],
-                        "Data_Cirurgia": r["Data_Cirurgia"], "Convenio": r["Convenio"],
-                        "Procedimento_Tipo_ID": tipo_nome2id.get(r["Tipo (nome)"]),
-                        "Situacao_ID": sit_nome2id.get(r["Situação (nome)"]),
-                        "Guia_AMHPTISS": r["Guia_AMHPTISS"], "Fatura": r["Fatura"],
-                        "Observacoes": r["Observacoes"]
-                    }
-                    insert_or_update_cirurgia(payload)
-            
-            st.success("Dados salvos e sincronizados!")
-            st.cache_data.clear()
-            # Força o checkpoint no GitHub Sync (via função interna)
-            st.rerun()
+        # --- CORREÇÃO AQUI: DEFINIÇÃO DAS COLUNAS PARA OS BOTÕES ---
+        col_btn_save, col_btn_export = st.columns(2)
+
+        with col_btn_save:
+            if st.button("💾 Salvar Alterações", use_container_width=True):
+                ensure_db_writable()
+                for _, r in edited_df.iterrows():
+                    if r["Tipo (nome)"] or r["Situação (nome)"]:
+                        payload = {
+                            "Hospital": r["Hospital"], "Atendimento": r["Atendimento"],
+                            "Paciente": r["Paciente"], "Prestador": r["Prestador"],
+                            "Data_Cirurgia": r["Data_Cirurgia"], "Convenio": r["Convenio"],
+                            "Procedimento_Tipo_ID": tipo_nome2id.get(r["Tipo (nome)"]),
+                            "Situacao_ID": sit_nome2id.get(r["Situação (nome)"]),
+                            "Guia_AMHPTISS": r["Guia_AMHPTISS"], "Fatura": r["Fatura"],
+                            "Observacoes": r["Observacoes"]
+                        }
+                        insert_or_update_cirurgia(payload)
+                st.success("Dados salvos e sincronizados!")
+                st.cache_data.clear()
+                st.rerun()
 
         with col_btn_export:
-                # BLOCO DE EXPORTAÇÃO INSERIDO AQUI
-                if st.button("📊 Preparar Excel para Download", use_container_width=True):
-                    try:
-                        df_export = edited_df.copy()
-                        excel_data = to_formatted_excel_cirurgias(df_export)
-                                
-                        st.download_button(
-                            label="⬇️ Clique para Baixar Planilha",
-                            data=excel_data,
-                            file_name=f"Cirurgias_{datetime.now().strftime('%d_%m_%Y')}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            use_container_width=True
-                            )
-                    except Exception as e:
-                        st.error(f"Erro ao gerar Excel: {e}")
+            if st.button("📊 Preparar Excel para Download", use_container_width=True):
+                try:
+                    df_export = edited_df.copy()
+                    excel_data = to_formatted_excel_cirurgias(df_export)
+                    st.download_button(
+                        label="⬇️ Clique para Baixar Planilha",
+                        data=excel_data,
+                        file_name=f"Cirurgias_{datetime.now().strftime('%d_%m_%Y')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
+                except Exception as e:
+                    st.error(f"Erro ao gerar Excel: {e}")
        
         with st.expander("🗑️ Exclusão em lote (por filtros)", expanded=False):
             st.caption("Hospital é obrigatório. Demais filtros opcionais; se todos vazios, nada será apagado.")
