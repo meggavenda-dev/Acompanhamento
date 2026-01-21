@@ -623,6 +623,9 @@ with tabs[1]:
             "Observacoes", "created_at", "updated_at"
         ])
 
+        if "Data_Pagamento" not in df_cir.columns:
+            df_cir["Data_Pagamento"] = None
+
         df_base_mapped = pd.DataFrame()
         if not ignorar_base:
             base_rows = find_registros_para_prefill(hosp_cad, ano=int(ano_cad) if usar_periodo else None, 
