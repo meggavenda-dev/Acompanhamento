@@ -493,26 +493,28 @@ with tabs[1]:
                 st.markdown("- O filtro de datas aceita formato `dd/MM/yyyy`.")
 
         # Mapeia candidatos da base para o esquema de cirurgias (com colunas legíveis)
+        
         df_base_mapped = pd.DataFrame({
-            "id": [None]*len(df_base),
+            "id": [None] * len(df_base),
             "Hospital": df_base["Hospital"],
             "Atendimento": df_base["Atendimento"],
             "Paciente": df_base["Paciente"],
             "Prestador": df_base["Prestador"],
             "Data_Cirurgia": df_base["Data"],
             "Convenio": df_base["Convenio"],
-            "Procedimento_Tipo_ID": [None]*len(df_base),  # será preenchido ao salvar
-            "Situacao_ID": [None]*len(df_base),           # idem
+            "Procedimento_Tipo_ID": [None] * len(df_base),
+            "Situacao_ID": [None] * len(df_base),
             "Guia_AMHPTISS": ["" for _ in range(len(df_base))],
             "Guia_AMHPTISS_Complemento": ["" for _ in range(len(df_base))],
             "Fatura": ["" for _ in range(len(df_base))],
             "Observacoes": ["" for _ in range(len(df_base))],
-            "created_at": [None]*len(df_base),
-            "updated_at": [None]*len(df_base],
-            "Fonte": ["Base"]*len(df_base),
-            "Tipo (nome)": ["" for _ in range(len(df_base))],  # edição por nome
-            "Situação (nome)": ["" for _ in range(len(df_base))]  # edição por nome
+            "created_at": [None] * len(df_base),
+            "updated_at": [None] * len(df_base),
+            "Fonte": ["Base"] * len(df_base),
+            "Tipo (nome)": ["" for _ in range(len(df_base))],
+            "Situação (nome)": ["" for _ in range(len(df_base))]
         })
+
 
         # --- Seleção manual dos candidatos para importar ---
         st.markdown("#### Selecione os candidatos da base que deseja importar como Cirurgias")
