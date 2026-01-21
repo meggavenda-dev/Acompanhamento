@@ -242,7 +242,7 @@ def vacuum() -> None:
                 conn.execute("PRAGMA optimize")
             except Exception:
                 pass
-    except sqlite3.OperationalError as e:
+    except sqlite3.OperationalError:
         # Propaga; o app decide ignorar se for read-only
         raise
 
@@ -542,15 +542,11 @@ def list_registros_base_all(limit: int = 500) -> List[Tuple]:
 # =============================================================================
 
 def list_procedimento_tipos(only_active: bool = True) -> List[Tuple]:
-    """
-    Lista tipos com ordenação determinística para o Selectbox do Streamlit.
-    """
     eng = get_engine()
-    # Adicionamos o TRIM no nome para garantir que o Streamlit não veja duplicatas por causa de espaços
-    sql = "SELECT id, TRIM(nome) as nome, ativo, ordem FROM procedimento_tipos"
+    sql = "SELECT id, nome, ativo, ordem FROM procedimento_tipos"
     if only_active:
         sql += " WHERE ativo=1"
-    sql += " ORDER BY ordem ASC, nome ASC"
+    sql += " ORDER BY ordem, nome"
     with eng.connect() as conn:
         return conn.execute(text(sql)).fetchall()
 
@@ -614,28 +610,23 @@ def set_cirurgia_situacao_status(sid: int, ativo: int) -> None:
 # =============================================================================
 
 def insert_or_update_cirurgia(payload: Dict[str, Any]) -> int:
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
     """
-    UPSERT de cirurgia com tratamento de timestamps para Sincronização GitHub.
+    UPSERT de cirurgia. A chave é:
+    (Hospital, Atendimento, Paciente, Prestador, Data_Cirurgia)
+    Observação: Aceita Atendimento vazio se Paciente vier preenchido (e vice-versa).
     """
     ensure_unique_indexes()
     ensure_db_writable()
 
-    # Normalização rigorosa para evitar quebras no mapeamento
     h = _safe_str(payload.get("Hospital"))
     att = _safe_str(payload.get("Atendimento"), "")
     pac = _safe_str(payload.get("Paciente"), "")
     p = _safe_str(payload.get("Prestador"))
     d = _safe_str(payload.get("Data_Cirurgia"))
-    
-    # Validação de integridade
     if not h or not p or not d or (not att and not pac):
-        return 0
+        raise ValueError("Chave mínima inválida para cirurgia.")
 
-    # O timestamp atual é VITAL para o merge do GitHub (last-write-wins)
-    now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
+    now = datetime.now().isoformat(timespec="seconds")
     eng = get_engine()
     with eng.begin() as conn:
         conn.execute(text("""
@@ -648,7 +639,7 @@ def insert_or_update_cirurgia(payload: Dict[str, Any]) -> int:
             VALUES (
                 :Hospital, :Atendimento, :Paciente, :Prestador, :Data,
                 :Convenio, :TipoID, :SitID,
-                :Guia, :GuiaC, :Fatura, :Obs, :now, :now
+                :Guia, :GuiaC, :Fatura, :Obs, :created, :updated
             )
             ON CONFLICT(Hospital, Atendimento, Paciente, Prestador, Data_Cirurgia)
             DO UPDATE SET
@@ -659,7 +650,7 @@ def insert_or_update_cirurgia(payload: Dict[str, Any]) -> int:
                 Guia_AMHPTISS_Complemento=excluded.Guia_AMHPTISS_Complemento,
                 Fatura=excluded.Fatura,
                 Observacoes=excluded.Observacoes,
-                updated_at=excluded.updated_at -- Importante para o Merge do GitHub
+                updated_at=excluded.updated_at
         """), {
             "Hospital": h, "Atendimento": att, "Paciente": pac, "Prestador": p, "Data": d,
             "Convenio": _safe_str(payload.get("Convenio")),
@@ -669,11 +660,10 @@ def insert_or_update_cirurgia(payload: Dict[str, Any]) -> int:
             "GuiaC": _safe_str(payload.get("Guia_AMHPTISS_Complemento")),
             "Fatura": _safe_str(payload.get("Fatura")),
             "Obs": _safe_str(payload.get("Observacoes")),
-            "now": now_ts
+            "created": now, "updated": now
         })
-        
         row = conn.execute(text("""
-            SELECT id FROM cirurgias 
+            SELECT id FROM cirurgias
             WHERE Hospital=:h AND Atendimento=:a AND Paciente=:p AND Prestador=:pr AND Data_Cirurgia=:d
         """), {"h": h, "a": att, "p": pac, "pr": p, "d": d}).fetchone()
         return int(row[0]) if row else 0
@@ -701,19 +691,16 @@ def _ano_mes_clause_for_cirurgias(ano_mes: Optional[str]) -> Tuple[str, dict]:
     }
 
 
-
 def list_cirurgias(
     hospital: Optional[str] = None,
     ano_mes: Optional[str] = None,
-    prestador: Optional[str] = None,
-    situacoes: Optional[List[int]] = None
+    prestador: Optional[str] = None
 ) -> List[Tuple]:
     """
     Lista cirurgias com filtros opcionais:
       - hospital: exato
       - ano_mes: 'YYYY-MM' (aceita ambas formas ao persistir)
       - prestador: exato (se informado)
-      - situacoes: lista de IDs de situação (filtra por Situacao_ID)
     """
     clauses = []
     params: Dict[str, Any] = {}
@@ -726,21 +713,18 @@ def list_cirurgias(
         clauses.append("Prestador=:p")
         params["p"] = prestador
 
-    if situacoes and len(situacoes) > 0:
-        placeholders = []
-        for i, s in enumerate(situacoes):
-            key = f"s{i}"
-            params[key] = int(s)
-            placeholders.append(f":{key}")
-        clauses.append(f"Situacao_ID IN ({', '.join(placeholders)})")
-
     # Filtro Ano/Mês para Data_Cirurgia
     ano_mes_clause, ano_mes_params = _ano_mes_clause_for_cirurgias(ano_mes)
-    if ano_mes_clause:
-        clauses.append(ano_mes_clause[5:] if ano_mes_clause.startswith(" AND ") else ano_mes_clause)
-        params.update(ano_mes_params)
-
-    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    where = " AND ".join(clauses)
+    if where:
+        where = " WHERE " + where
+        if ano_mes_clause:
+            where += ano_mes_clause
+            params.update(ano_mes_params)
+    else:
+        if ano_mes_clause:
+            where = " WHERE 1=1 " + ano_mes_clause
+            params.update(ano_mes_params)
 
     sql = f"""
         SELECT id, Hospital, Atendimento, Paciente, Prestador, Data_Cirurgia,
@@ -753,6 +737,7 @@ def list_cirurgias(
     eng = get_engine()
     with eng.connect() as conn:
         return conn.execute(text(sql), params).fetchall()
+
 
 def delete_cirurgia(cirurgia_id: int) -> int:
     ensure_db_writable()
