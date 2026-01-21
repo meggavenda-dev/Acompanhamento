@@ -69,28 +69,36 @@ def _write_sheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame):
 
 # ---------------- Exportações (Pacientes) ----------------
 
-def to_formatted_excel(
-    df: pd.DataFrame,
-    sheet_name: str = "Pacientes por dia e prestador"
-) -> io.BytesIO:
+def to_formatted_excel_cirurgias(df: pd.DataFrame) -> io.BytesIO:
     """
-    Gera Excel em memória com proteção contra dados nulos.
+    Gera um Excel organizado por Hospital, garantindo que as colunas
+    estjam na ordem correta e visualmente limpas.
     """
     output = io.BytesIO()
-
-    # ✅ Validação e coerção de tipo
-    if df is None or not hasattr(df, "columns"):
-        try:
-            df = pd.DataFrame(df)
-        except Exception:
-            with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-                pd.DataFrame({"Aviso": ["Nenhum dado disponível para exportação"]}).to_excel(writer, index=False)
-            output.seek(0)
-            return output
+    
+    if df is None or df.empty:
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            pd.DataFrame({"Aviso": ["Nenhum dado encontrado para os filtros selecionados"]}).to_excel(writer, index=False)
+        output.seek(0)
+        return output
 
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        _write_sheet(writer, _sanitize_sheet_name(sheet_name), df)
-    
+        # Se houver a coluna Hospital, criamos abas separadas
+        hospital_col = "Hospital" if "Hospital" in df.columns else None
+        
+        if hospital_col:
+            hospitais = df[hospital_col].unique()
+            for hosp in sorted(hospitais):
+                df_hosp = df[df[hospital_col] == hosp].copy()
+                # Removemos colunas técnicas do Excel final
+                cols_to_drop = ["id", "Procedimento_Tipo_ID", "Situacao_ID", "has_id", "_row_idx"]
+                df_hosp = df_hosp.drop(columns=[c for c in cols_to_drop if c in df_hosp.columns], errors="ignore")
+                
+                sheet_name = _sanitize_sheet_name(str(hosp))
+                _write_sheet(writer, sheet_name, df_hosp)
+        else:
+            _write_sheet(writer, "Cirurgias", df)
+
     output.seek(0)
     return output
 
