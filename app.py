@@ -557,9 +557,14 @@ with tabs[1]:
                 m_paciente = st.text_input("Nome do Paciente *")
                 m_atendimento = st.text_input("Número do Atendimento")
                 m_data = st.date_input("Data da Cirurgia", value=datetime.now())
+                # NOVO CAMPO
+                m_data_pagamento = st.date_input("Data do Pagamento", value=None, help="Deixe vazio se não pago")
+            
             with colM2:
                 m_prestador = st.text_input("Nome do Prestador *")
                 m_convenio = st.text_input("Convênio")
+                # NOVO CAMPO
+                m_guia_comp = st.text_input("Guia Complemento")
                 m_tipo_nome = st.selectbox("Tipo de Procedimento", options=[""] + tipo_nome_list)
                 m_situacao_nome = st.selectbox("Situação", options=[""] + sit_nome_list)
 
@@ -581,8 +586,9 @@ with tabs[1]:
                         "Procedimento_Tipo_ID": tipo_nome2id.get(m_tipo_nome),
                         "Situacao_ID": sit_nome2id.get(m_situacao_nome),
                         "Guia_AMHPTISS": "",
-                        "Guia_AMHPTISS_Complemento": "",
+                        "Guia_AMHPTISS_Complemento": m_guia_comp,
                         "Fatura": "",
+                        "Data_Pagamento": m_data_pagamento.strftime("%Y-%m-%d") if m_data_pagamento else None,
                         "Observacoes": m_obs
                     }
                     
@@ -652,8 +658,11 @@ with tabs[1]:
 
         # 6. Grid de Edição
         st.markdown("#### Grid de Edição")
-        cols_view = ["Hospital", "Atendimento", "Paciente", "Prestador", "Data_Cirurgia", "Convenio", 
-                     "Tipo (nome)", "Situação (nome)", "Guia_AMHPTISS", "Fatura", "Observacoes"]
+        cols_view = [
+            "Hospital", "Atendimento", "Paciente", "Prestador", "Data_Cirurgia", "Convenio", 
+            "Tipo (nome)", "Situação (nome)", "Guia_AMHPTISS", "Guia_AMHPTISS_Complemento", # Adicionado aqui
+            "Fatura", "Data_Pagamento", "Observacoes" # Adicionado aqui
+        ]
         
         edited_df = st.data_editor(
             df_union[cols_view],
@@ -661,6 +670,8 @@ with tabs[1]:
             column_config={
                 "Tipo (nome)": st.column_config.SelectboxColumn(options=[""] + tipo_nome_list),
                 "Situação (nome)": st.column_config.SelectboxColumn(options=[""] + sit_nome_list),
+                "Data_Pagamento": st.column_config.DateColumn("Data Pgto", format="DD/MM/YYYY"),
+                "Guia_AMHPTISS_Complemento": st.column_config.TextColumn("Guia Comp."),
             },
             key="editor_cirurgias_final"
         )
@@ -675,12 +686,18 @@ with tabs[1]:
                 for _, r in edited_df.iterrows():
                     if r["Tipo (nome)"] or r["Situação (nome)"]:
                         payload = {
-                            "Hospital": r["Hospital"], "Atendimento": r["Atendimento"],
-                            "Paciente": r["Paciente"], "Prestador": r["Prestador"],
-                            "Data_Cirurgia": r["Data_Cirurgia"], "Convenio": r["Convenio"],
+                            "Hospital": r["Hospital"], 
+                            "Atendimento": r["Atendimento"],
+                            "Paciente": r["Paciente"], 
+                            "Prestador": r["Prestador"],
+                            "Data_Cirurgia": r["Data_Cirurgia"], 
+                            "Convenio": r["Convenio"],
                             "Procedimento_Tipo_ID": tipo_nome2id.get(r["Tipo (nome)"]),
                             "Situacao_ID": sit_nome2id.get(r["Situação (nome)"]),
-                            "Guia_AMHPTISS": r["Guia_AMHPTISS"], "Fatura": r["Fatura"],
+                            "Guia_AMHPTISS": r["Guia_AMHPTISS"], 
+                            "Guia_AMHPTISS_Complemento": r["Guia_AMHPTISS_Complemento"], # Adicionado aqui
+                            "Fatura": r["Fatura"],
+                            "Data_Pagamento": r["Data_Pagamento"], # Adicionado aqui
                             "Observacoes": r["Observacoes"]
                         }
                         insert_or_update_cirurgia(payload)
