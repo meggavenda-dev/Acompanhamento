@@ -614,6 +614,8 @@ def set_cirurgia_situacao_status(sid: int, ativo: int) -> None:
 # =============================================================================
 
 def insert_or_update_cirurgia(payload: Dict[str, Any]) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
     """
     UPSERT de cirurgia com tratamento de timestamps para Sincronização GitHub.
     """
