@@ -630,19 +630,7 @@ with tabs[1]:
         # Agora, adicionamos a coluna nova manualmente se ela não existir
         # Isso evita o erro de "16 vs 15" e permite que o app rode
         if "Data_Pagamento" not in df_cir.columns:
-            df_cir["Data_Pagamento"] = None
-
-        
-        # Garantir que Campo "Data" da base seja datetime válido
-        df_base["Data"] = pd.to_datetime(df_base["Data"], dayfirst=True, errors="coerce")
-
-        
-        df_base["Data"] = (
-            pd.to_datetime(df_base["Data"], dayfirst=True, errors="coerce")
-              .fillna(pd.to_datetime(df_base["Data"], errors="coerce"))
-        )
-
-
+            df_cir["Data_Pagamento"] = None         
 
         
         df_base_mapped = pd.DataFrame()
@@ -654,7 +642,7 @@ with tabs[1]:
                 mes=int(mes_cad) if usar_periodo else None,
                 prestadores=prestadores_lista_filtro
             )
-            
+        
             if base_rows:
                 # Agora df_base existe
                 df_base = pd.DataFrame(
@@ -662,11 +650,9 @@ with tabs[1]:
                     columns=["Hospital", "Data", "Atendimento", "Paciente", "Convenio", "Prestador"]
                 )
         
-                # 🔥 Correção REAL da data (somente aqui!)
-                df_base["Data"] = pd.to_datetime(df_base["Data"], dayfirst=True, errors="coerce")
-                df_base["Data"].fillna(
-                    pd.to_datetime(df_base["Data"], errors="coerce"),
-                    inplace=True
+                # ✔️ Correção segura da data (somente aqui!)
+                df_base["Data"] = pd.to_datetime(
+                    df_base["Data"], dayfirst=True, errors="coerce"
                 )
         
                 df_base_mapped = pd.DataFrame({
@@ -674,7 +660,7 @@ with tabs[1]:
                     "Atendimento": df_base["Atendimento"],
                     "Paciente": df_base["Paciente"],
                     "Prestador": df_base["Prestador"],
-                    "Data_Cirurgia": df_base["Data"],  # agora com datetime correto
+                    "Data_Cirurgia": df_base["Data"],   # agora válido
                     "Convenio": df_base["Convenio"],
                     "Guia_AMHPTISS_Complemento": "",
                     "Data_Pagamento": None,
