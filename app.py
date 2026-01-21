@@ -676,19 +676,24 @@ with tabs[1]:
             
             df_union = df_union.drop(columns=[c for c in df_union.columns if c.endswith("_snap")])
 
+        
         # 6. Grid de Edição
         st.markdown("#### Grid de Edição")
-
+        
         # --- DEFINA AS COLUNAS AQUI ---
         cols_view = [
             "Hospital", "Atendimento", "Paciente", "Prestador", "Data_Cirurgia", "Convenio", 
             "Tipo (nome)", "Situação (nome)", "Guia_AMHPTISS", "Guia_AMHPTISS_Complemento", 
             "Fatura", "Data_Pagamento", "Observacoes"
         ]
-
+        
+        # --- Correção dos tipos de data para o Streamlit ---
+        df_union["Data_Cirurgia"] = pd.to_datetime(df_union["Data_Cirurgia"], errors="coerce")
+        df_union["Data_Pagamento"] = pd.to_datetime(df_union["Data_Pagamento"], errors="coerce")
+        
         # --- DEFINA A VARIÁVEL AQUI (ANTES DO EDITOR) ---
         editor_key = f"grid_{hosp_cad}_{ano_cad}_{mes_cad}"
-
+        
         edited_df = st.data_editor(
             df_union[cols_view],
             use_container_width=True,
@@ -702,6 +707,7 @@ with tabs[1]:
             },
             key=editor_key
         )
+
         
         # Salva o estado atual no snapshot para não perder ao recarregar
         st.session_state["cirurgias_editadas_snapshot"] = edited_df
